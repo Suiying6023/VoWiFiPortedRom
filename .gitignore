@@ -1,0 +1,22 @@
+# Never commit signing material or ROM-extracted framework jars.
+*.keystore
+*.jks
+*.p12
+framework.jar
+android.jar
+*.odex
+*.vdex
+
+# Build output
+*-unsigned.apk
+*-aligned.apk
+*.idsig
+out*/
+ktout*/
+javaout*/
+dex*/
+*.log
+
+# Patch leftovers: diff -ruN would otherwise write these in as new files
+*.orig
+*.rej

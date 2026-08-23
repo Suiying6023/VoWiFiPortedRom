@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Minimal manifest for the floss-ims build we actually ship.
+
+  Why this exists instead of binary-patching the upstream compiled manifest:
+  the previous pipeline kept the upstream AndroidManifest.xml and edited the
+  compiled AXML in place (patch_targetsdk.py for targetSdk 33->28, plus string
+  pool substitutions to inject permissions). That could only *replace* strings,
+  never add them, so every new permission cost an existing one - RECORD_AUDIO
+  was sacrificed to make room for INTERNET, which is what disabled calling.
+
+  Rebuilding from source is safe here because the classes we compile reference
+  no resources at all: MainActivity is the only resource user and it is excluded
+  from the build. So there is no @mipmap/@style/@string to preserve, no
+  resources.arsc, and no baked resource IDs that a re-link could invalidate.
+
+  Deliberate choices:
+  - No <application android:icon/label/theme>: those were the only reason the
+    upstream manifest referenced resources.
+  - No MainActivity: not compiled into our dex.
+  - No coreApp / sharedUserId="android.uid.system": those need the platform
+    signing key, which we do not have. The priv-app whitelist provides the
+    privileged permissions instead.
+  - No android:persistent: also system-app only.
+  - PhhImsBroadcastReceiver is registered at runtime (registerReceiver in
+    PhhImsService.onCreate), so it must NOT be declared here.
+  - targetSdk 28 on purpose: ImsFeature$Capabilities and
+    notifyCapabilitiesStatusChanged(Capabilities) are hidden as MAX-TARGET-O, so
+    reflection on them is only permitted below API 29. This replaces
+    patch_targetsdk.py entirely.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="me.phh.ims">
+
+    <uses-sdk android:minSdkVersion="32" android:targetSdkVersion="28" />
+
+    <!-- Networking: requestNetwork(NET_CAPABILITY_IMS) needs ACCESS_NETWORK_STATE,
+         and IMS is a restricted capability so it also needs
+         CONNECTIVITY_USE_RESTRICTED_NETWORKS (priv-app whitelist grants it).
+         INTERNET is required to open the SIP sockets - upstream never declared
+         it because it ran as uid=system. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.CONNECTIVITY_USE_RESTRICTED_NETWORKS" />
+
+    <!-- Telephony: READ_PRIVILEGED_PHONE_STATE backs the EAP-AKA NAI and IMSI
+         reads; READ_PHONE_STATE is what MIUI checks before handing out the
+         device identifier used for sip.instance. -->
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <uses-permission android:name="android.permission.READ_PRIVILEGED_PHONE_STATE" />
+    <uses-permission android:name="android.permission.MODIFY_PHONE_STATE" />
+
+    <!-- Voice calls: phh builds its own media path (AudioRecord -> MediaCodec
+         AMR -> RTP), so the microphone permission is what gates calling. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- Keeps the registration-refresh alarm exact; without it the alarm is
+         deferrable and the SIP binding can lapse before it fires. -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+
+    <application
+        android:allowBackup="false"
+        android:extractNativeLibs="false"
+        android:supportsRtl="true">
+
+        <service
+            android:name="me.phh.ims.PhhImsService"
+            android:exported="true"
+            android:directBootAware="true"
+            android:permission="android.permission.BIND_IMS_SERVICE">
+            <intent-filter>
+                <action android:name="android.telephony.ims.ImsService" />
+            </intent-filter>
+        </service>
+    </application>
+</manifest>
