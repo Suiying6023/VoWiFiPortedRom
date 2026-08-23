@@ -1,11 +1,11 @@
 # 移植 ROM 上的 VoWiFi
 
-在不支持 VoWiFi 的移植 ROM 上跑通 WiFi 通话：SIP 注册、双向短信、语音通话。
-不改 modem，不需要平台签名。打包成一个 KernelSU 模块。
+尝试在不支持 VoWiFi 的移植 ROM 上跑通 WiFi 通话：SIP 注册、双向短信、语音通话。
+本项目不改 modem，不需要平台签名，目前打包为 KernelSU 模块。
 
 ## 适用范围
 
-预编译模块只在这一个组合上构建和实测过：
+预编译模块只在此情况下构建和实测过：
 
 | | |
 |---|---|
@@ -14,10 +14,8 @@
 | 安卓 | Android 17（API 37） |
 | 运营商 | 英国 VOXI（Vodafone MVNO，234-15），境外漫游 |
 
-机型与 ROM 一致的情况下，直接刷入即可。
-
 若不一致，安装脚本会给出警告，但不会阻止安装。模块不改动任何分区、可随时卸载，
-尝试的代价很低；只是能否工作没有把握，最常见的表现是框架始终不报
+尝试的代价很低；只是没有把握可以工作，最常见的表现是框架始终不报
 `isVowifiEnabled=true`。这种情况建议先读 [PORTING-GUIDE.md](PORTING-GUIDE.md)，
 其中区分了哪些属于安卓框架层的通用机制、哪些需要针对具体 ROM 重做。
 
@@ -95,28 +93,3 @@ code/diagnostics/      健康检查 / 状态总览 / 看门狗 / 测试脚本
 动手之前建议先确认是否确有必要：如果 ROM 自带的 IMS 栈本身可用、仅被 carrier config
 关闭，那只是覆盖几个键的小改动。判断方法见指南开头。
 
-## 致谢
-
-- [phhusson/ims](https://github.com/phhusson/ims) —— floss-ims 的 MMTEL/SIP 实现，
-  本项目的基础。GPL-2.0
-- AOSP `packages/services/Iwlan` —— ePDG / IKEv2 实现。Apache-2.0
-- 酷安 @江南烟雨断桥殇 —— 本项目针对的 `diting` 澎湃 OS4 移植包
-
-## 许可
-
-floss-ims 是 GPL-2.0，补丁属衍生作品，沿用同一许可；仓库内自写的脚本和模块同样按
-GPL-2.0 发布。
-
-仓库中不含签名密钥库、带隐藏 API 的 `android.jar`，也不含从 ROM 中提取的
-`framework.jar` 与 dex —— 前者不宜提供，后者属于各家 vendor，转发并不合适。
-IMSI、ICCID 与电话号码一概没有，补丁注释中曾出现的部分已替换为占位符。
-
-## 风险提示
-
-VOXI 的条款中明确写有，漫游状态下使用 WiFi Calling 属于
-"prohibited and not supported"。既然官方并不支持这条路径，资费表中自然也没有对应条目，
-**计费情况只能通过实测确认**。`docs/carrier-voxi-uk.md` 记录了实测结果，
-其中一项正是依资费表推断、最终被账单否定的例子。
-
-此外，这套方案改变的是手机拨打电话的方式，紧急呼叫也可能受到影响，
-安装前请充分了解这一点。
