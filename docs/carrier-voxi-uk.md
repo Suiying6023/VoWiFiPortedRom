@@ -1,104 +1,93 @@
-# Carrier notes: VOXI UK (Vodafone MVNO, MCC/MNC 234-15)
+# 运营商资料：英国 VOXI（Vodafone MVNO，MCC/MNC 234-15）
 
-A worked example for the main README. **These values are VOXI/Vodafone UK's** — for
-another carrier the shapes stay the same and the numbers do not. Included because
-seeing one filled-in instance makes it much clearer what you need to find for yours.
+本文是 README 的一个完整实例。**这些数值属于 VOXI/Vodafone UK** ——
+换一家运营商，格式不变、数值全变。收录于此是因为看一个填好的样例，
+比空表格更能说明自己需要找哪些东西。
 
-Device context: Redmi K50 Ultra, ported HyperOS / Android 17, physically outside the
-UK (so roaming), connecting over ordinary WiFi.
+设备背景：Redmi K50 至尊版，澎湃 OS 移植包 / Android 17，
+物理位置在英国境外（即漫游状态），走普通 WiFi 接入。
 
-## Values you would need to find for your own carrier
+## 换运营商时需要自行查找的数值
 
-| What | VOXI UK value | How to find yours |
+| 项目 | VOXI UK 的值 | 如何查找 |
 |---|---|---|
-| MCC/MNC | `234-15` | `getprop gsm.operator.numeric`, or the IMSI's first 5 digits |
-| ePDG FQDN | `epdg.epc.mnc015.mcc234.pub.3gppnetwork.org` | standard 3GPP form; substitute your MCC/MNC |
-| ePDG addresses seen | `88.82.11.208`, `88.82.11.221`, `148.252.188.96` | resolve the FQDN; **expect several and expect them to rotate** |
-| IMS realm | `ims.mnc015.mcc234.3gppnetwork.org` | same 3GPP form |
-| SMSC number | `447785016005` | read it from the TS 24.011 field of a real outbound SMS; do **not** hardcode, decode it |
-| SMS-SC PSI | `ipsmms1mc05.ims.mnc015.mcc234.3gppnetwork.org` | learn it from the `From:` header of an inbound SMS |
-| Registration expiry granted | `3590s` | whatever the `200 OK` to your REGISTER says — **read it, don't assume** |
-| Free test number | `191` (Vodafone/VOXI customer service) | your carrier's own free service number |
+| MCC/MNC | `234-15` | `getprop gsm.operator.numeric`，或 IMSI 前 5 位 |
+| ePDG FQDN | `epdg.epc.mnc015.mcc234.pub.3gppnetwork.org` | 标准 3GPP 格式，代入自己的 MCC/MNC |
+| 见过的 ePDG 地址 | `88.82.11.208`、`88.82.11.221`、`148.252.188.96` | 解析 FQDN；**会有多个且会轮换** |
+| IMS realm | `ims.mnc015.mcc234.3gppnetwork.org` | 同样的 3GPP 格式 |
+| SMSC 号码 | `447785016005` | 从一条真实发出短信的 TS 24.011 字段里解码；**不要硬编码，要解码** |
+| SMS-SC PSI | `ipsmms1mc05.ims.mnc015.mcc234.3gppnetwork.org` | 从收到的短信的 `From:` 头获取 |
+| 注册有效期（网络授予） | `3590s` | 以 REGISTER 收到的 `200 OK` 为准 —— **读出来，不要假设** |
+| 免费测试号码 | `191`（Vodafone/VOXI 客服） | 自己运营商的免费服务号 |
 
-The last two matter more than they look:
+最后两项比看上去更重要：
 
-**Registration expiry:** we asked for `Expires: 600000` and the network granted
-**3590s**. Upstream refreshed on a fixed 3000s alarm, which sounds safe but is not
-once the OS defers the alarm — MIUI's app-standby pushed it out by over 30 minutes
-and the binding lapsed. Inbound SMS was then dropped **by the network** with
-nothing logged locally. Read the granted value and refresh at half of it, with an
-exact alarm.
+**注册有效期：** 我们请求的是 `Expires: 600000`，网络只授予 **3590s**。
+上游代码按固定 3000s 的闹钟刷新，听起来安全，实际不然 —— 一旦系统推迟闹钟
+（MIUI 的应用待机把它推迟了 30 分钟以上），绑定就会过期失效。之后来短信是**被网络丢弃**的，
+本地日志毫无痕迹。正确做法：读出授予值，按它的一半刷新，并使用精确闹钟。
 
-**SMSC encoding:** the field is TS 24.011 — a length byte, then TON/NPI, then the
-number in nibble-swapped BCD. We wasted a version hardcoding the number because we
-first mis-read it as "the number is missing a digit". It was not; the decoding was
-wrong. `447785016005` above is what correct decoding yields.
+**SMSC 编码：** 该字段是 TS 24.011 格式 —— 一个长度字节，然后 TON/NPI，
+再后是半字节交换的 BCD 号码。我们曾硬编码这个号码并浪费了一个版本，
+因为最初误判为"号码少了一位"。其实不是；是解码写错了。上面的 `447785016005`
+才是正确解码的结果。
 
-## Roaming specifics
+## 漫游相关
 
-- The ePDG SA's local address is **`wlan0` itself**, not a VPN/tunnel interface.
-  Consequence: a local HTTP/SOCKS proxy or a VPN app **cannot** intercept this
-  traffic — our Iwlan uses the default network and binds its own sockets, so
-  proxy logs show zero hits for VoWiFi. We verified this twice from opposite
-  directions; do not spend time trying to route it through a proxy.
-- The P-CSCF address and even the SIP bearer's address family **change between
-  reconnects** (we saw both IPv4 and IPv6, and several P-CSCF addresses). Never
-  treat them as constants — in particular, never grep logs or `ss` output by peer
-  IP; filter by port or by pid.
-- `data_roaming1` (the **per-subscription** key, not `data_roaming`) had to be `1`
-  to *establish* the tunnel. It does **not** need to stay 1 — verified running with
-  it at 0, tunnel and calls intact. So you need not leave roaming data enabled and
-  accrue charges.
-- The P-CSCF drops the control connection about **once an hour, on the hour**. That
-  is convenient: you do not need luck to test reconnect handling, just wait for the
-  next hour boundary.
+- ePDG SA 的本地地址就是 **`wlan0` 本身**，不是 VPN/隧道接口。
+  后果：本地 HTTP/SOCKS 代理或 VPN 应用**截不到这部分流量** ——
+  我们的 Iwlan 使用默认网络并自行绑定 socket，代理日志中 VoWiFi 流量为零。
+  我们从两个方向各验证过一次；不要浪费时间试图让它走代理。
+- P-CSCF 地址甚至 SIP 承载的地址族**每次重连都会变**
+  （IPv4 和 IPv6 都见过，P-CSCF 地址也有多个）。
+  不要把它们当常量 —— 尤其不要按对端 IP 去 grep 日志或 `ss` 输出；按端口或 pid 过滤。
+- `data_roaming1`（**按订阅的键**，不是 `data_roaming`）必须为 `1` 才能*建立*隧道。
+  但它不需要一直保持为 1 —— 已实测在 0 的状态下隧道和通话都正常。
+  因此不必为了保住隧道而开着漫游数据产生费用。
+- P-CSCF 约每小时整点主动断开一次控制连接。这反而方便：
+  测试重连处理不需要碰运气，等到下一个整点即可。
 
-## Billing, measured — not read off the rate card
+## 计费实测 —— 不是照资费表推的
 
-**This is the part most worth copying as a method, not as numbers.**
+**这一节值得抄的是方法，不是数字。**
 
-| Action | Result | How known |
+| 操作 | 结果 | 依据 |
 |---|---|---|
-| Call `191` | **free** | measured |
-| Outbound SMS while roaming | **£0.24 per message** | measured (an accidental send) |
-| Inbound SMS | free | measured, 3 separate messages |
-| Receiving a call, ROW zone 1 | **£0.36/min**, 1-minute minimum | carrier's published table |
+| 呼叫 `191` | **免费** | 实测 |
+| 漫游状态发短信 | **每条 £0.24** | 实测（一次误发） |
+| 收短信 | 免费 | 实测，共三条 |
+| 接来电，ROW 1 区 | **£0.36/分钟**，最低计费 1 分钟 | 运营商公开资费表 |
 
-The plan includes "unlimited calls and texts" — but that is annotated **UK only**,
-and for Rest-of-World zones VOXI requires a Global Roaming Pass (8 days £16 = 100
-min / 100 texts / 2GB) before any allowance applies.
+套餐包含"无限通话和短信"—— 但标注了**仅限英国境内**，
+对于世界其他地区（Rest-of-World），VOXI 要求先购买 Global Roaming Pass
+（8 天 £16 = 100 分钟 / 100 条短信 / 2GB），额度才生效。
 
-We initially reasoned from Vodafone's statement that *"There's no extra charge for
-using WiFi calling. All calls and texts are rated as per your price plan"* and
-concluded outbound SMS would be free. **That was wrong** — a real message cost
-£0.24.
+我们最初依据 Vodafone 的说法 *"There's no extra charge for using WiFi calling.
+All calls and texts are rated as per your price plan"* 推断漫游发短信应该免费。
+**推断错了** —— 一条真实的短信扣了 £0.24。
 
-The reason the rate card cannot answer this: Vodafone's own terms say **"The use of
-Wi-Fi Calling whilst roaming is prohibited and is not supported."** We are on a path
-the carrier does not define, so no table covers it. **Measure with account balance
-before and after; do not infer.**
+资费表回答不了这个问题的原因在于：Vodafone 自己的条款写明
+**"The use of Wi-Fi Calling whilst roaming is prohibited and is not supported."**
+我们走的路运营商没有定义，所以没有任何表格覆盖它。
+**用前后余额实测；不要推断。**
 
-Also note receiving is *not* free here. Do not assume the inbound direction is
-free just because inbound SMS is.
+另外注意接听并不免费。不要因为收短信免费就假定入方向都不收费。
 
-## Things that turned out not to be the problem
+## 后来证明不是问题的地方
 
-Recorded because each one absorbed real time:
+记录在此，因为每一项都消耗过真实时间：
 
-- **Geo-blocking at the IKE layer.** Our IKE_AUTH completed fine from outside the
-  UK — the SA came up with a genuine Vodafone UK ePDG address. The blocker was
-  never IKE.
-- **Routing VoWiFi through a UK exit.** Two experiments, apparently contradictory,
-  reconciled to the same guidance: with a local proxy the traffic never reaches it;
-  with an upstream bridge it does reach it and IKE then times out. Either way:
-  **do not try to proxy this.**
-- **The MBN / modem config.** Not an obstacle for this approach, since the whole
-  stack moved to the application processor.
-- **`*#*#869434#*#*`** and similar engineering menus do not exist on this ROM.
+- **IKE 层的地理封锁。** 我们在英国境外完成 IKE_AUTH 毫无障碍 ——
+  SA 建在了真正的 Vodafone UK ePDG 地址上。阻碍从来不在 IKE。
+- **让 VoWiFi 走英国出口。** 两次实验结果看似矛盾，归并为同一条结论：
+  走本地代理时流量根本到不了代理；走上游桥接时流量到了，但 IKE 随之超时。
+  无论哪种：**别想着给它挂代理。**
+- **MBN / modem 配置。** 对本方案不构成障碍，因为整个栈已经搬到应用处理器上了。
+- `*#*#869434#*#*` 及类似工程菜单在这个 ROM 上不存在。
 
-## One correction worth carrying
+## 一个值得记住的教训
 
-An early outbound SMS reached `RP-ACK` and we recorded that as "SMS works". It was
-sent to a **mistyped number**. `RP-ACK` proves the signalling path works; it does
-**not** prove delivery to the intended recipient. Correct-number end-to-end
-delivery is still unverified here (deliberately — it costs £0.24 a try).
+早期一条外发短信到达了 `RP-ACK`，我们记下"短信功能可用"。
+但那条号码**输错了**。`RP-ACK` 只证明信令路径正常，
+**不证明投递到了目标接收人**。正确号码的端到端投递至今未验证
+（有意为之 —— 每验证一次 £0.24）。

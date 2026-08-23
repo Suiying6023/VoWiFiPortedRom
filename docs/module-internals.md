@@ -1,89 +1,78 @@
-# VoWiFi stack — KernelSU module
+# VoWiFi 栈 —— KernelSU 模块
 
-Deploys the whole WiFi-calling stack in one flash: **registration, two-way SMS,
-and voice calls**, all verified working on a Redmi K50 Ultra running a ported
-HyperOS / Android 17 with a UK VOXI eSIM.
+一次刷入部署整套 WiFi 通话栈：**注册、双向短信、语音通话**，
+已在 Redmi K50 至尊版（澎湃 OS 移植包 / Android 17，英国 VOXI eSIM）上全部实测可用。
 
-## What's inside and why it's three packages, not one
+## 模块内容，以及为什么是三个包而不是一个
 
-| Package | Role | uid / `reqid` |
+| 包 | 职责 | uid / `reqid` |
 |---|---|---|
-| `com.google.android.iwlan` | AOSP Iwlan — builds the ePDG IPsec tunnel | tunnel SAs |
-| `me.phh.ims` | phh floss-ims — SIP, MMTEL, SMS, voice media | sec-agree transport SAs |
-| `com.voxi.minqns` | minimal QualifiedNetworksService — tells the framework "IMS goes over IWLAN" | — |
+| `com.google.android.iwlan` | AOSP Iwlan —— 建立 ePDG IPsec 隧道 | 隧道 SA |
+| `me.phh.ims` | phh floss-ims —— SIP、MMTEL、短信、语音媒体 | sec-agree 传输 SA |
+| `com.voxi.minqns` | 最小 QualifiedNetworksService —— 告诉框架"IMS 走 IWLAN" | — |
 
-Merging these into a single APK is technically possible (checked: no
-`Build.VERSION`, `PendingIntent` or foreground-service dependency anywhere, so
-they can share targetSdk 28) but **deliberately not done**. Separate uids are
-what make `ip xfrm state`'s `reqid` field distinguish tunnel SAs from transport
-SAs, and that is the single most useful diagnostic in this project. They also
-stay independently switchable for A/B testing. One module already solves the
-"deploy in one step" problem without giving that up.
+把三者合并为单个 APK 技术上可行（已核查：任何地方都不依赖
+`Build.VERSION`、`PendingIntent` 可变性或带类型的前台服务，可以共用 targetSdk 28），
+但**刻意没有这么做**。独立的 uid 正是 `ip xfrm state` 的 `reqid`
+字段能区分隧道 SA 与传输 SA 的前提，而这是本项目最有用的单项诊断依据。
+保持独立还便于单独开关做 A/B 测试。一个模块已经解决了"一步部署"的问题，
+无须为此放弃上述优势。
 
-## Install
+## 安装
 
-Flash in the KernelSU manager, then **reboot** — privileged permissions are
-evaluated from the priv-app manifest when the package is scanned at boot, so
-they cannot take effect before one.
+在 KernelSU 管理器中刷入，然后**重启** —— 特权权限是开机扫描软件包时
+从 priv-app manifest 评估的，重启之前不会生效。
 
-After boot, check what happened:
+开机后查看发生了什么：
 
 ```sh
-su -c 'sh /data/local/tmp/phh_status.sh'      # one screen, whole stack
-cat /data/local/tmp/vowifi_stack_boot.log     # what service.sh did
+su -c 'sh /data/local/tmp/phh_status.sh'      # 一屏看完整个栈的状态
+cat /data/local/tmp/vowifi_stack_boot.log     # service.sh 这次开机做了什么
 ```
 
-A healthy idle state looks like: 1–2 established sockets, 1 listening, `SAs: 6`
-split across two `reqid`s, `dangling: 0`, `capabil.: 11`.
+健康的空闲状态：1~2 个 established socket、1 个 listening、
+`SAs: 6` 分属两个 `reqid`、`dangling: 0`、`capabil.: 11`。
 
-## The part that is not a file overlay
+## carrier config 为什么不是文件 overlay
 
-Three APKs and two privapp allowlists are a plain `system/` overlay. The seven
-**carrier-config overrides are not** — they live in `com.android.phone`'s runtime
-cache under `/data/user_de/0/com.android.phone/files`, in a file whose name
-contains the SIM's ICCID, and the platform rebuilds it. So `service.sh` waits for
-boot plus 30s and re-injects them each boot. It derives the filename by glob
-rather than hardcoding the ICCID, keeps a `.bak.vowifi_stack` copy, skips the
-write when the keys are already present, and refuses to commit if its own edit
-does not look right.
+三个 APK 和两份 privapp 白名单是普通的 `system/` overlay。
+那七条 **carrier config 覆盖键不是** —— 它们位于
+`/data/user_de/0/com.android.phone/files` 下 `com.android.phone` 的运行时缓存中，
+文件名里含 SIM 卡的 ICCID，而且平台会重建该文件。因此 `service.sh`
+等开机完成后再等 30 秒，每次开机重新注入。文件名通过 glob 推导而非硬编码 ICCID，
+保留一份 `.bak.vowifi_stack` 备份，键已存在时跳过写入，
+自身编辑结果看起来不对时拒绝提交。
 
-The keys come in **(package, class) pairs** — injecting half a pair silently
-leaves the framework on the stock component, which looks like "the module did
-nothing".
+这些键以**（包名, 类名）成对**出现 —— 只注入一半，框架会静默地继续指向原厂组件，
+表现恰好就是"模块没起作用"。
 
-## Uninstall
+## 卸载
 
-`uninstall.sh` restores the carrier config from that backup. This matters: simply
-deleting the module unmounts the APKs but would leave the framework pointed at
-packages that no longer exist, which can leave the phone with **no working IMS at
-all**.
+`uninstall.sh` 从备份还原 carrier config。这一步很重要：
+直接删除模块只是卸掉了 APK 的挂载，框架却仍指向已不存在的包，
+可能导致手机**完全没有可用的 IMS**。
 
-## What this module does NOT do
+## 本模块不做什么
 
-- It does not configure your carrier's ePDG address, APN or IMS APN — those come
-  from the SIM and the carrier config, and they are carrier-specific.
-- It does not enable the watchdog. `service.sh` will start
-  `/data/local/tmp/phh_watchdog.sh` only if you put it there yourself, because
-  that script can `force-stop` the IMS service and that is not a decision a
-  module should make for you.
-- It does not touch `data_roaming`. Worth knowing: the tunnel was established
-  with `data_roaming1=1`, but it **keeps running with it at 0** — verified — so
-  you do not need to leave roaming data on and accrue charges.
+- 不配置运营商的 ePDG 地址、APN 或 IMS APN —— 这些来自 SIM 卡和
+  carrier config，因运营商而异。
+- 不默认启用看门狗。只有你亲手把 `/data/local/tmp/phh_watchdog.sh` 放过去，
+  `service.sh` 才会启动它 —— 因为该脚本可以 force-stop IMS 服务，
+  这不是模块应该替人做的决定。
+- 不碰 `data_roaming`。值得知道的一点：隧道是在 `data_roaming1=1` 时建立的，
+  但**在它为 0 时持续运行正常**（已实测），所以不必开着漫游数据产生费用。
 
-## Billing, measured not assumed
+## 计费实测而非推断
 
-- Calls to `191` (Vodafone/VOXI customer service): **free**, confirmed.
-- Outbound SMS while roaming: **charged**. One message cost £0.24 — it does not
-  come out of the plan's "unlimited UK texts", which is UK-only.
-- Inbound SMS: free.
-- Vodafone's own terms say Wi-Fi Calling while roaming is "prohibited and not
-  supported", so this is an undefined-by-the-carrier path. Do not assume plan
-  allowances apply; measure before relying on it.
+- 呼叫 `191`（Vodafone/VOXI 客服）：**免费**，已确认。
+- 漫游状态发短信：**收费**。一条 £0.24 —— 不从套餐的"无限英国短信"里扣，那是英国境内限定。
+- 收短信：免费。
+- Vodafone 自己的条款写明漫游时使用 Wi-Fi Calling 属于 "prohibited and not supported"，
+  所以这是运营商未定义的路径。不要假定套餐额度适用；依赖之前先实测。
 
-## Built from
+## 构建来源
 
-`floss-ims-local.patch` against `github.com/phhusson/ims` commit `c180bdf`
-(note: the repo is `phhusson/ims`, not `phhusson/floss-ims`). The phh APK here is
-v39. Voice needs `targetSdk 28` (for the MAX-TARGET-O hidden APIs) **and**
-`RECORD_AUDIO`, both of which come from the hand-written manifest in the build
-pipeline, not from the patch.
+`floss-ims-local.patch` 基于 `github.com/phhusson/ims` 的 commit `c180bdf`
+（注意仓库名是 `phhusson/ims`，不是 `phhusson/floss-ims`）。这里的 phh APK 为 v39。
+语音通话需要 `targetSdk 28`（为了 MAX-TARGET-O 那批隐藏 API）**和**
+`RECORD_AUDIO` 权限 —— 两者都来自构建流水线中手写的 manifest，不来自补丁。
