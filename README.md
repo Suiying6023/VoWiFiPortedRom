@@ -1,151 +1,138 @@
-# VoWiFi (WiFi Calling) on a ported ROM
+# 移植 ROM 上的 VoWiFi（WiFi 通话）
 
-Working WiFi calling — **SIP registration, SMS both ways, and voice calls** — on a
-phone whose ROM does not support it, with no modem changes and no platform signing
-key.
+在一个本来不支持 VoWiFi 的移植 ROM 上，把 WiFi 通话真正跑通 —— **SIP 注册、双向短信、语音通话**，
+不改 modem、不需要平台签名。
 
-Ships as a single KernelSU module. Also included: the full porting guide, every
-source patch, the build pipeline, and the diagnostic scripts.
+打包成一个 KernelSU 模块。同时附带完整的移植指南、全部源码补丁、构建流水线和诊断脚本。
 
-> ### ⚠️ Read this before flashing
+*[English version](README.en.md)*
+
+> ### ⚠️ 刷之前请先读这段
 >
-> **The prebuilt module was built and tested on exactly one target:**
+> **预编译的模块只在一个组合上构建和实测过：**
 >
 > | | |
 > |---|---|
-> | Device | **Redmi K50 Ultra / 12T Pro** (`diting`, `22081212C`) |
-> | ROM | **HyperOS 4 port by Coolapk [@江南烟雨断桥殇](https://www.coolapk.com/)** |
-> | Android | **17 (API 37)** |
-> | Carrier | UK VOXI (Vodafone MVNO, 234-15), roaming, over ordinary WiFi |
+> | 机型 | **Redmi K50 至尊版 / 小米 12T Pro**（`diting`，`22081212C`） |
+> | ROM | **酷安 [@江南烟雨断桥殇](https://www.coolapk.com/) 的澎湃 OS4 移植包** |
+> | 安卓 | **Android 17（API 37）** |
+> | 运营商 | 英国 VOXI（Vodafone 的 MVNO，234-15），境外漫游、走普通 WiFi |
 >
-> **Same device and same ROM?** Flash it and it should work.
+> **同机型同 ROM？** 直接刷，应该能用。
 >
-> **Anything else?** The installer will warn you but still let you try — nothing
-> here touches a partition, and you can remove the module again. Expect it *not* to
-> work as-is, most likely with the framework never reporting
-> `isVowifiEnabled=true`. **[PORTING-GUIDE.md](PORTING-GUIDE.md) is written for
-> exactly that case** — it explains which parts are general and what you have to
-> rebuild for your own ROM (at minimum, the IMS APK against *your*
-> `framework.jar`).
+> **其他情况？** 安装脚本会警告，但仍然允许你装 —— 本模块不动任何分区，随时可以卸载。
+> 但请预期它**开箱不能用**，最典型的表现是框架始终不报 `isVowifiEnabled=true`。
+> **[PORTING-GUIDE.md](PORTING-GUIDE.md) 就是为这种情况写的** ——
+> 它讲清了哪些部分是框架通用机制、哪些必须针对你自己的 ROM 重做
+> （最低限度：拿**你自己 ROM 的 `framework.jar`** 重新编译那个 IMS APK）。
 >
-> This is not an official build of anything, comes with no warranty, and your
-> carrier may forbid it. See [Legal and scope](#legal-and-scope).
+> 这不是任何官方版本，不提供任何保证，而且你的运营商可能明确禁止这种用法。
+> 见[许可与免责](#许可与免责)。
 
-## Quick start (matching device)
+## 快速开始（机型匹配的情况）
 
-1. Flash `code/module/vowifi-stack-v6.zip` in the KernelSU manager.
-2. **Reboot.** Privileged permissions are evaluated when packages are scanned at
-   boot, so they cannot take effect before one.
-3. Enable WiFi calling in Settings.
-4. Check it: press **Action** on the module in the KernelSU manager, or run
+1. 在 KernelSU 管理器里刷 `code/module/vowifi-stack-v6.zip`
+2. **重启。** 特权权限是在开机扫描软件包时评估的，不重启不可能生效。
+3. 在系统设置里打开 WiFi 通话
+4. 检查状态：在 KernelSU 管理器里点这个模块的 **Action** 按钮，或者跑
    ```sh
    su -c 'sh /data/local/tmp/phh_status.sh'
    ```
 
-A healthy idle state looks like: 1–2 established sockets plus 1 listening,
-`SAs` non-zero split across two `reqid`s, `dangling: 0`, `capabil.: 11`.
+健康的空闲状态大致是：1~2 个 established socket + 1 个 listening，
+`SAs` 非零且分属两个 `reqid`，`dangling: 0`，`capabil.: 11`。
 
-If `SAs` is 0, the tunnel never came up. If `capabil.` is not `11`, the IMS service
-is not reaching the framework — check `/data/local/tmp/vowifi_stack_boot.log` for
-permission warnings.
+`SAs` 是 0 说明隧道根本没建起来。`capabil.` 不是 `11` 说明 IMS 服务没把能力上报给框架 ——
+去看 `/data/local/tmp/vowifi_stack_boot.log` 里有没有权限相关的警告。
 
-## What it actually does
+## 它到底在做什么
 
-Four things have to be true, and they are **independent** — most time lost on this
-kind of project comes from confusing one for another:
+有四件事必须同时成立，而且**彼此独立** ——
+这类项目里浪费掉的时间，大多来自把其中一件误认成另一件：
 
-| | What | Provided by |
+| | 要做什么 | 由谁来做 |
 |---|---|---|
-| 1 | Build an IPsec tunnel to the carrier's ePDG (IKEv2 + EAP-AKA) | AOSP `Iwlan`, ported |
-| 2 | Convince the framework IMS belongs on WLAN, not cellular | a minimal `QualifiedNetworksService` |
-| 3 | Speak SIP/MMTEL inside that tunnel | [phh's floss-ims](https://github.com/phhusson/ims), patched |
-| 4 | Get the framework to bind *your* service as MMTEL | carrier-config overrides |
+| 1 | 对运营商的 ePDG 跑 IKEv2 + EAP-AKA，建立 IPsec 隧道 | 移植过来的 AOSP `Iwlan` |
+| 2 | 让框架相信 IMS 该走 WLAN 而不是蜂窝 | 一个最小的 `QualifiedNetworksService` |
+| 3 | 在那条隧道里说 SIP/MMTEL | 打过补丁的 [phh floss-ims](https://github.com/phhusson/ims) |
+| 4 | 让框架把**你的**服务绑定为 MMTEL 提供方 | carrier config 覆盖键 |
 
-**The insight that makes it possible:** on a Qualcomm device the modem normally owns
-all four and you cannot reach into it. But Android's telephony framework lets a
-carrier app take over each one — `ImsResolver` will bind an arbitrary package as the
-MMTEL provider, and `IwlanDataService` is ordinary AOSP Java. So the whole stack
-moves to the application processor and the modem is left out of it. That is why this
-works on a device whose modem refuses.
+**让这件事成立的关键认知**：在高通设备上，这四件事通常都由 modem 掌管，而你伸不进去。
+但安卓的电话框架允许一个 carrier app 逐个接管它们 ——
+`ImsResolver` 会绑定任意一个包作为 MMTEL 提供方，而 `IwlanDataService` 就是普通的 AOSP Java 代码。
+所以整套栈可以搬到应用处理器侧，把 modem 完全排除在外。
+**这就是为什么它能在一台 modem 明确拒绝 VoWiFi 的设备上跑起来。**
 
-## Status
+## 完成度
 
 | | |
 |---|---|
-| SIP registration over a real ePDG tunnel | ✅ verified, survives the hourly P-CSCF reconnect |
-| Inbound SMS | ✅ verified |
-| Outbound SMS | ✅ verified to `RP-ACK` |
-| **Outgoing calls** | ✅ **verified** — connected, two-way AMR audio, correct call timer |
-| **Incoming calls** | ⚠️ the bug that broke them is found and fixed, **but the fix has not been re-tested with a real inbound call** |
+| 在真实 ePDG 隧道上的 SIP 注册 | ✅ 已验证，能扛住 P-CSCF 每小时一次的主动断连 |
+| 接收短信 | ✅ 已验证 |
+| 发送短信 | ✅ 已验证到 `RP-ACK` |
+| **拨出通话** | ✅ **已验证** —— 接通、双向 AMR 语音、通话计时正确 |
+| **来电** | ⚠️ 让来电必断的那个 bug 已定位并修复，**但修复本身还没用真实来电复测过** |
 
-Everything above is one device and one carrier. The framework mechanisms are
-general; the specific values are not.
+以上全部是**一台设备、一个运营商**的结果。框架层的机制是通用的，具体数值不是。
 
-## Repository layout
+## 仓库结构
 
 ```
-PORTING-GUIDE.md              the actual guide: architecture, phase order,
-                              and every trap that cost us time
-docs/carrier-voxi-uk.md       one carrier's concrete values, as a worked example
-docs/module-internals.md      how the module works and why service.sh exists
+PORTING-GUIDE.md              正文指南：架构、分阶段验收标准，
+                              以及真正花掉时间的每一个坑
+docs/carrier-voxi-uk.md       一个运营商的具体数值，当作填好的样例看
+docs/module-internals.md      模块怎么工作、为什么必须有 service.sh
 
-code/module/                  the KernelSU module (+ prebuilt zip)
-code/patches/                 all source changes to floss-ims, one patch
-code/build/                   build pipeline: aapt2 → javac/kotlinc → d8 → sign
-code/minqns/                  minimal QualifiedNetworksService (source)
-code/diagnostics/             health / status / watchdog + test scripts
+code/module/                  KernelSU 模块（含预编译 zip）
+code/patches/                 对 floss-ims 的全部源码改动，一个补丁文件
+code/build/                   构建流水线：aapt2 → javac/kotlinc → d8 → 签名
+code/minqns/                  最小 QualifiedNetworksService（源码）
+code/diagnostics/             健康检查 / 状态总览 / 看门狗 + 测试脚本
 ```
 
-`code/patches/floss-ims-local.patch` states its exact upstream base commit and has
-been verified to apply with **zero fuzz** and to round-trip to the source the working
-APKs were built from. Its header lists every change and the reason for it.
+`code/patches/floss-ims-local.patch` 里写明了它对应的上游 commit，
+并且已验证：对该 commit **零 fuzz** 应用，且应用后与实际编译出工作 APK 的源码逐字节一致。
+补丁头部逐条列出了每处改动和原因。
 
-## If you want to adapt this to your device
+## 想改成适配你自己的设备
 
-Start with [PORTING-GUIDE.md](PORTING-GUIDE.md). The short version of what is
-device-specific:
+从 [PORTING-GUIDE.md](PORTING-GUIDE.md) 开始。哪些东西是设备相关的，简短版：
 
-- **The IMS APK must be rebuilt against your ROM's `framework.jar`.** Vendor
-  framework signatures differ from AOSP — HyperOS's
-  `notifyCapabilitiesStatusChanged` takes a different parameter type, and that call
-  is what tells the framework the stack can do WiFi calling.
-- **`targetSdk 28` is load-bearing**, not an accident. It is what makes the
-  `MAX-TARGET-O` hidden APIs reachable. We burned six build iterations on reflection
-  before realising one packaging line replaced all of it.
-- **Your carrier's ePDG/IMS values come from the SIM and carrier config**, not from
-  this module. `docs/carrier-voxi-uk.md` shows what to look for.
+- **IMS APK 必须拿你自己 ROM 的 `framework.jar` 重新编译。**
+  各家 vendor 改过框架签名 —— 澎湃的 `notifyCapabilitiesStatusChanged`
+  参数类型就和 AOSP 不一样，而正是这个调用负责告诉框架"这套栈能做 WiFi 通话"。
+- **`targetSdk 28` 是有实际作用的**，不是随手写的。
+  它是让 `MAX-TARGET-O` 那批隐藏 API 变得可达的原因。
+  我在这上面白烧了六个构建版本去写反射，才发现一行打包参数就能替代全部工作。
+- **运营商的 ePDG / IMS 数值来自 SIM 卡和 carrier config**，不在这个模块里。
+  `docs/carrier-voxi-uk.md` 演示了要去找哪些东西。
 
-And before porting anything, check whether you need to at all — a ROM whose IMS
-stack works but is merely disabled by carrier config is a much smaller problem. The
-guide opens with how to tell.
+另外，在动手移植之前先确认你是否真的需要 ——
+如果一个 ROM 的 IMS 栈本身能工作、只是被 carrier config 关掉了，那是个小得多的问题。
+指南开头就讲了怎么判断。
 
-## Credits
+## 致谢
 
-- **[phhusson/ims](https://github.com/phhusson/ims)** — the floss-ims MMTEL/SIP
-  implementation this builds on. Without it none of this exists. GPL-2.0.
-- **AOSP `packages/services/Iwlan`** — the ePDG/IKEv2 implementation. Apache-2.0.
-- **Coolapk @江南烟雨断桥殇** — the HyperOS 4 port for `diting` that this targets.
-- The patches and integration work here are ours; see the patch header for what
-  each change is and why.
+- **[phhusson/ims](https://github.com/phhusson/ims)** —— 本项目所依赖的 floss-ims
+  MMTEL/SIP 实现。没有它就没有这一切。GPL-2.0。
+- **AOSP `packages/services/Iwlan`** —— ePDG / IKEv2 的实现。Apache-2.0。
+- **酷安 @江南烟雨断桥殇** —— 本项目所针对的 `diting` 澎湃 OS4 移植包。
+- 这里的补丁和整合工作是我做的；每处改动是什么、为什么，见补丁头部。
 
-Nothing here is novel research. AOSP Iwlan, floss-ims and the carrier-config
-override mechanism all pre-date this work. What is written down is the integration
-and the failure modes.
+**这里没有任何新的研究成果。** AOSP Iwlan、floss-ims、carrier config 覆盖机制
+都早于这项工作存在。被写下来的是整合过程和那些失败形态。
 
-## Legal and scope
+## 许可与免责
 
-- floss-ims is GPL-2.0; the patch in `code/patches/` is a derivative and carries the
-  same licence. Our own scripts and the module are provided under GPL-2.0 as well
-  for simplicity.
-- **Not included, deliberately:** signing keystores, an `android.jar` with hidden
-  APIs, and any `framework.jar`/dex extracted from a ROM. You need your own ROM's
-  framework jar anyway, and redistributing a vendor's is not ours to do.
-- **No IMSI, ICCID or phone numbers** appear anywhere in this repo; they were
-  scrubbed from patch comments and replaced with placeholders.
-- **Your carrier may prohibit this.** Ours states that WiFi Calling while roaming is
-  "prohibited and not supported" — which also means **billing behaviour is
-  undefined**. Measure it rather than reasoning from the rate card; we have a
-  measured example in `docs/carrier-voxi-uk.md`, including one case where our
-  reasonable inference was simply wrong.
-- No warranty. This modifies how your phone places calls, including potentially
-  emergency calls. Understand that before relying on it.
+- floss-ims 是 GPL-2.0，`code/patches/` 里的补丁是其衍生物，沿用同一许可。
+  为简单起见，我自己写的脚本和模块也一并按 GPL-2.0 提供。
+- **刻意没有包含**：签名密钥库、带隐藏 API 的 `android.jar`、
+  以及任何从 ROM 里抽出来的 `framework.jar`/dex。
+  你本来就需要你自己 ROM 的 framework jar，而重新分发 vendor 的东西不是我该做的事。
+- **仓库里不含任何 IMSI、ICCID 或电话号码** —— 补丁注释里出现过的都已替换成占位符。
+- **你的运营商可能禁止这种用法。** 我这家的条款写着漫游时使用 WiFi Calling
+  "prohibited and not supported"（禁止且不受支持）—— 这同时意味着**计费行为是未定义的**。
+  请实测，不要照着资费表推断；`docs/carrier-voxi-uk.md` 里有实测数据，
+  包括一处我"合理推断"结果完全错误的例子。
+- 不提供任何保证。这改变的是你手机拨打电话的方式，**可能包括紧急呼叫**。
+  在依赖它之前请理解这一点。
