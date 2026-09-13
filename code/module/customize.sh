@@ -44,10 +44,9 @@ else
   ui_print "! Tested ONLY on: Redmi K50 Ultra / 12T Pro (diting),"
   ui_print "! HyperOS 4 port by Coolapk \@江南烟雨断桥殇, API 37."
   ui_print "!"
-  ui_print "! Installing anyway is safe to TRY -- it does not modify any"
-  ui_print "! partition, and the module can be removed again. But expect it"
-  ui_print "! not to work, most likely with the framework never reporting"
-  ui_print "! isVowifiEnabled=true."
+  ui_print "! This changes the IMS provider and can affect calls and SMS."
+  ui_print "! Keep a recovery path and uninstall through the module manager"
+  ui_print "! if the target ROM cannot run these components."
   ui_print "!"
   ui_print "! To adapt it, see README.md in the repo: you will at least need"
   ui_print "! to rebuild the IMS APK against YOUR ROM's framework.jar."
@@ -81,7 +80,12 @@ for D in PhhIms IwlanAosp MinQns; do
 done
 chcon -R u:object_r:system_file:s0 "$MODPATH/system/system_ext/etc/permissions" 2>/dev/null
 
-# Ship the diagnostics where the docs say they live, but do not start anything.
+# Preserve the user's watchdog opt-out across module upgrades.
+if [ -f /data/adb/modules/vowifi_stack/watchdog.disabled ]; then
+  touch "$MODPATH/watchdog.disabled"
+fi
+
+# Ship diagnostics; service.sh starts the included watchdog after boot.
 if [ -d "$MODPATH/tools" ]; then
   ui_print "- Installing diagnostics to /data/local/tmp"
   for F in "$MODPATH"/tools/*.sh; do
@@ -98,7 +102,7 @@ ui_print "  privileged permissions are evaluated from the priv-app"
 ui_print "  manifest at scan time, so they only take effect on boot."
 ui_print " "
 ui_print "- After reboot, carrier-config overrides are re-injected by"
-ui_print "  service.sh about 30s after boot completes. Check:"
+ui_print "  service.sh once the carrier cache is ready. Check:"
 ui_print "    /data/local/tmp/vowifi_stack_boot.log"
 ui_print " "
 ui_print "! This does NOT configure your carrier's ePDG address or APN."

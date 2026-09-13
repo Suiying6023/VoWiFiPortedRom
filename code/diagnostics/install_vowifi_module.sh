@@ -15,7 +15,7 @@
 # /system_ext/priv-app/ims (org.codeaurora.ims), which is still installed and
 # running, and this module does not replace it.
 set -u
-ZIP=/data/local/tmp/vowifi-stack-v1.zip
+ZIP=${1:?usage: install_vowifi_module.sh /data/local/tmp/vowifi-stack-v7.zip}
 [ -f "$ZIP" ] || { echo "FAIL: $ZIP missing"; exit 1; }
 
 echo "=== before ==="

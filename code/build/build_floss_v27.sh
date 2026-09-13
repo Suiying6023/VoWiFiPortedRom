@@ -41,7 +41,8 @@ done
 echo "== 1/5 aapt2 link (manifest -> skeleton apk) =="
 "$AAPT2" link -o "$(cygpath -w manifest/base.apk)" \
   -I "$(cygpath -w "$ANDROID_JAR")" \
-  --manifest "$(cygpath -w manifest/AndroidManifest.xml)"
+  --manifest "$(cygpath -w manifest/AndroidManifest.xml)" \
+  --min-sdk-version 32 --target-sdk-version 28
 
 echo "== 2/5 javac (PhhMmTelFeatureProtected) =="
 rm -rf javaoutV && mkdir -p javaoutV

@@ -1,6 +1,6 @@
 id=vowifi_stack
 name=VoWiFi stack (Iwlan + floss-ims + MinQns)
-version=v6-v43
-versionCode=6
+version=v7-v43-iwlan13
+versionCode=7
 author=local
-description=Complete VoWiFi/WFC stack for ported HyperOS: AOSP Iwlan builds the ePDG tunnel, phh floss-ims does SIP/MMTEL/SMS/voice, MinQns tells the framework IMS goes over IWLAN. Installs all three as system_ext priv-app and re-injects the carrier-config overrides on every boot. Registration + two-way SMS + voice calls all verified working.
+description=VoWiFi registration and SMS maintenance for diting / HyperOS port / API 37. Iwlan v13 + phh v43 + MinQns. Includes guarded recovery and carrier configuration. Voice calls remain unreliable; account activity requires a confirmed billed event or top-up.

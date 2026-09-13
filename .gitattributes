@@ -1,4 +1,5 @@
-# Keep every file exactly as committed.
+# Default text files use LF. Android scripts and patches retain their exact bytes.
+* text=auto eol=lf
 #
 # This matters: Android's shell fails on CRLF line endings (a line that plainly
 # exists reports "not found"), and a CRLF patch file will not apply. Marking these
@@ -9,3 +10,4 @@
 *.prop  -text
 *.py    -text
 *.zip   -text
+*.apk   -text

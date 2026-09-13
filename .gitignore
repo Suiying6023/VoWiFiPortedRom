@@ -8,6 +8,8 @@ android.jar
 *.vdex
 
 # Build output
+/code/module/*.zip
+__pycache__/
 *-unsigned.apk
 *-aligned.apk
 *.idsig

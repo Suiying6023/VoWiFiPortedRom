@@ -1,92 +1,99 @@
 #!/system/bin/sh
-# Self-healing watchdog for the phh IMS registration.
-#
-# v29 fixed the main-socket spin at the source (the read loop honours
-# parseMessage's return value and rebuilds the connection), and v34 fixed three
-# reconnect-only defects on top. This is the net for what those do not cover,
-# and it covers THREE distinct failures:
-#
-#  1. The spin: phh_health.sh reports log-spin, or the process is gone.
-#  2. Silent expiry: the registration lapses with NO log and NO socket change.
-#     Vodafone grants 3590s and phh refreshes at half that, so a successful
-#     refresh must appear well within an hour. If none has, the registration is
-#     either dead or about to be -- and downlink SMS is dropped by the network
-#     with nothing logged locally, which is why this needs an active check.
-#  3. Missing listener: the P-CSCF connects back on (local port + 1). If that
-#     listener is gone, inbound SUBSCRIBE/NOTIFY and incoming SMS cannot arrive
-#     while the outbound control socket still looks perfectly healthy.
-#
-# force-stop is safe recovery: it does NOT tear down the ePDG tunnel (that
-# belongs to the Iwlan uid) and the service re-registers in ~100s. Verified.
-LOG=/data/local/tmp/phh_watchdog.log
-STAMP=/data/local/tmp/phh_last_grant
+# Recover local registration faults, with calls and unavailable WiFi as vetoes.
+BASE=${PHH_RUNTIME_DIR:-/data/local/tmp}
+. "${0%/*}/phh_common.sh" || exit 1
+LOG=$BASE/phh_watchdog.log
+STAMP=$BASE/phh_last_grant
 
-note() { echo "$(date '+%m-%d %H:%M:%S') $*" >> $LOG; }
+# Kernel-held lock: concurrent starts exit, and a dead process leaves no stale lock.
+exec 9> "$BASE/.phh_watchdog.lock"
+# Android mksh closes non-standard descriptors on exec unless passed explicitly.
+flock -n 9 9>&9 || exit 0
 
-recover() {
-  # Never force-stop during a call. The health script no longer reports a spin while
-  # a call is up, but this is the backstop for every other BAD reason: killing the
-  # IMS service mid-call drops the call, and no fault this watchdog detects is worth
-  # that. It cost us a real one -- a connected 3m35s call to 191 was force-stopped
-  # because the per-RTP-packet logging looked like the main-socket spin.
-  if [ "$(echo "$2" | grep -c 'incall=1')" != "0" ]; then
-    note "-> NOT force-stopping ($1): call in progress"
-    return
+note() {
+  if [ -f "$LOG" ] && [ "$(wc -c < "$LOG")" -gt 65536 ]; then
+    tail -200 "$LOG" > "$LOG.trim" && mv "$LOG.trim" "$LOG"
   fi
-  note "-> force-stop ($1)"
-  am force-stop me.phh.ims
-  sleep 150
-  note "after: $(sh /data/local/tmp/phh_health.sh 2>/dev/null)"
-  date +%s > $STAMP
+  echo "$(date '+%m-%d %H:%M:%S') $*" >> "$LOG"
 }
 
-# Seed the stamp so a fresh watchdog does not immediately think it is stale.
-[ -f $STAMP ] || date +%s > $STAMP
+LAST_RECOVERY=0
+recover() {
+  # The earlier sample can be stale: re-read all SIMs immediately before acting.
+  CALL=$(phh_incall)
+  if [ "$CALL" != "0" ]; then
+    note "-> NOT force-stopping ($1): incall=$CALL"
+    return
+  fi
+  phh_wifi_ready || return
+  NOW=$(date +%s)
+  if [ "$LAST_RECOVERY" -gt 0 ] && [ $((NOW - LAST_RECOVERY)) -lt 900 ]; then
+    note "-> recovery deferred ($1): 900s cooldown"
+    return
+  fi
+  LAST_RECOVERY=$NOW
+  note "-> force-stop ($1)"
+  am force-stop me.phh.ims
+  sleep 150 9>&-
+  OWNER=
+  LAST_GRANT=0
+  note "after: $(sh "$BASE/phh_health.sh" 9>&- 2>/dev/null)"
+}
 
+OWNER=
+LAST_GRANT=0
+LEASE=3590
+FIRST_SEEN=$(date +%s)
+note "watchdog started (event timestamps, all-SIM call guard)"
 while true; do
-  R=$(sh /data/local/tmp/phh_health.sh 2>/dev/null)
-
-  # Track the most recent successful registration grant. Only bump the stamp when
-  # we actually see one, so a quiet log means the stamp goes stale -- which is the
-  # signal we want.
-  if logcat -b radio -d -t 400 2>/dev/null | grep -aq "granted for"; then
-    date +%s > $STAMP
+  R=$(sh "$BASE/phh_health.sh" 9>&- 2>/dev/null)
+  PID=$(phh_pid)
+  START_TICKS=
+  [ -z "$PID" ] || START_TICKS=$(awk '{print $22}' /proc/$PID/stat 2>/dev/null)
+  NOW=$(date +%s)
+  if [ "$PID:$START_TICKS" != "$OWNER" ]; then
+    OWNER=$PID:$START_TICKS
+    FIRST_SEEN=$NOW
+    LAST_GRANT=0
+    LEASE=3590
+  fi
+  GRANT=$(phh_grant "$PID")
+  if [ -n "$GRANT" ]; then
+    set -- $GRANT
+    if [ "$1" -gt "$LAST_GRANT" ] && [ "$1" -le "$NOW" ]; then
+      LAST_GRANT=$1
+      LEASE=$2
+      printf '%s\n' "$LAST_GRANT" > "$STAMP.tmp" && mv "$STAMP.tmp" "$STAMP"
+    fi
   fi
 
   case "$R" in
     OK*)
-      NOW=$(date +%s); LAST=$(cat $STAMP 2>/dev/null || echo $NOW)
-      AGE=$((NOW - LAST))
-      # 3900s > the 3590s grant, so a healthy refresh cycle can never trip this.
-      if [ "$AGE" -gt 3900 ]; then
-        note "BAD(silent) no grant seen for ${AGE}s: $R"
-        recover "stale-registration" "$R"
+      REF=$LAST_GRANT
+      [ "$REF" -gt 0 ] || REF=$FIRST_SEEN
+      AGE=$((NOW - REF))
+      if [ "$AGE" -gt $((LEASE + 310)) ]; then
+        note "BAD(silent) grant age=${AGE}s lease=${LEASE}s: $R"
+        recover stale-registration
       fi
       ;;
-    *)
+    BAD*)
       note "$R"
       case "$R" in
-        *log-spin*|*not-running*) recover "spin-or-dead" "$R" ;;
-        # A reconnect rebuilds the listener, so it is legitimately absent for a
-        # few seconds. Confirm before acting -- a false alarm here costs a
-        # force-stop and ~100s of downtime, and false alarms train you to ignore
-        # the log, which is worse than the bug.
+        *log-spin*|*phh-not-running*) recover spin-or-dead ;;
         *no-listener*)
-          sleep 20
-          R2=$(sh /data/local/tmp/phh_health.sh 2>/dev/null)
+          sleep 20 9>&-
+          R2=$(sh "$BASE/phh_health.sh" 9>&- 2>/dev/null)
           case "$R2" in
-            *no-listener*) note "confirmed: $R2"; recover "no-listener" "$R2" ;;
-            *) note "transient no-listener, recovered on its own: $R2" ;;
+            BAD*no-listener*) note "confirmed: $R2"; recover no-listener ;;
+            *) note "listener recheck: $R2" ;;
           esac
           ;;
-        # Deliberately NOT acting on sockets=0 alone: a reconnect in progress can
-        # legitimately show zero sockets for a moment.
-        # Deliberately NOT acting on dangling-policies either: a leaked xfrm
-        # policy is not a registration fault, force-stop would not reclaim it
-        # (the SAs belong to the transforms, not the process), and treating it as
-        # an outage would force-stop a working registration every 120s.
+        # Transient socket/policy rebuilds alone do not justify a force-stop.
       esac
       ;;
+    WAIT*) ;;
+    *) note "health probe unavailable; no recovery attempted" ;;
   esac
-  sleep 120
+  sleep 120 9>&-
 done

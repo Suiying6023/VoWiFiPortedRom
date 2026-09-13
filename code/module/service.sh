@@ -17,6 +17,7 @@
 # They are (package, class) PAIRS -- injecting one half of a pair silently leaves
 # the framework pointing at the stock component.
 MODDIR=${0%/*}
+. "$MODDIR/carrier-config.sh" || exit 1
 LOG=/data/local/tmp/vowifi_stack_boot.log
 DIR=/data/user_de/0/com.android.phone/files
 
@@ -66,47 +67,22 @@ for F in "$DIR"/carrierconfig-*.xml; do
   FOUND=$((FOUND+1))
 
   # Keep one pristine copy so the stack can be backed out without a factory reset.
-  [ -f "$F.bak.vowifi_stack" ] || cp -p "$F" "$F.bak.vowifi_stack"
+  if [ ! -f "$F.bak.vowifi_stack" ]; then
+    cp -p "$F" "$F.bak.vowifi_stack" || { echo "  backup failed; skipping cache"; continue; }
+  fi
 
   # Already injected (cache survived the reboot)? Then leave it alone -- rewriting
   # it while the phone process holds it open has no upside.
-  if [ "$(grep -c 'config_ims_mmtel_package_override_string' "$F")" != "0" ] &&
-     [ "$(grep -c 'carrier_qualified_networks_service_package_override_string' "$F")" != "0" ] &&
-     [ "$(grep -c 'carrier_data_service_wlan_package_override_string' "$F")" != "0" ]; then
+  if cc_valid "$F"; then
     echo "  $(basename "$F"): already has all overrides, skipping"
     continue
   fi
 
-  TMP=/data/local/tmp/.cc_vowifi.xml
-  # Drop any existing copies of our keys first, so re-running cannot duplicate them.
-  sed -E -e '/name="config_ims_package_override_string"/d' \
-         -e '/name="config_ims_mmtel_package_override_string"/d' \
-         -e '/name="carrier_data_service_wlan_package_override_string"/d' \
-         -e '/name="carrier_data_service_wlan_class_override_string"/d' \
-         -e '/name="carrier_network_service_wlan_package_override_string"/d' \
-         -e '/name="carrier_network_service_wlan_class_override_string"/d' \
-         -e '/name="carrier_qualified_networks_service_package_override_string"/d' \
-         -e '/name="carrier_qualified_networks_service_class_override_string"/d' \
-         "$F" > "$TMP"
-
-  sed -i 's#</bundle>#<string name="config_ims_mmtel_package_override_string">me.phh.ims</string>\
-<string name="carrier_data_service_wlan_package_override_string">com.google.android.iwlan</string>\
-<string name="carrier_data_service_wlan_class_override_string">com.google.android.iwlan.IwlanDataService</string>\
-<string name="carrier_network_service_wlan_package_override_string">com.google.android.iwlan</string>\
-<string name="carrier_network_service_wlan_class_override_string">com.google.android.iwlan.IwlanNetworkService</string>\
-<string name="carrier_qualified_networks_service_package_override_string">com.voxi.minqns</string>\
-<string name="carrier_qualified_networks_service_class_override_string">com.voxi.minqns.MinQnsService</string>\
-</bundle>#' "$TMP"
-
-  # Only commit if the result still parses as the bundle we expect and actually
-  # gained the keys -- a botched sed here would leave the phone with no carrier
-  # config at all.
-  if [ "$(grep -c 'config_ims_mmtel_package_override_string' "$TMP")" = "1" ] &&
-     [ "$(grep -c '</bundle>' "$TMP")" -ge 1 ]; then
-    cat "$TMP" > "$F"
-    echo "  $(basename "$F"): injected 7 keys"
+  TMP=/data/local/tmp/.cc_vowifi.$$.xml
+  if cc_render "$F" "$TMP"; then
+    cat "$TMP" > "$F" && echo "  carrier cache: injected and verified all 7 values"
   else
-    echo "  $(basename "$F"): REFUSED to write, sed result looks wrong"
+    echo "  carrier cache: REFUSED invalid override result"
   fi
   rm -f "$TMP"
 done
@@ -138,10 +114,18 @@ if [ "$(dumpsys package me.phh.ims 2>/dev/null | grep -c 'CONNECTIVITY_USE_RESTR
   echo "     Check the privapp-permissions XML landed and the base was re-scanned."
 fi
 
-# Optional watchdog, only if the user installed it. Not shipped enabled: it can
-# force-stop the IMS service, and that is not a decision a module should make on
-# someone's behalf.
-if [ -f /data/local/tmp/phh_watchdog.sh ] &&
+# Restore the bundled diagnostic helpers if /data/local/tmp was cleaned.
+# Runtime logs and registration timestamps are preserved.
+for TOOL in "$MODDIR"/tools/*.sh; do
+  [ -f "$TOOL" ] || continue
+  cp "$TOOL" "/data/local/tmp/$(basename "$TOOL")"
+  chmod 755 "/data/local/tmp/$(basename "$TOOL")"
+done
+
+# The module includes its watchdog. A persistent opt-out is available via
+# /data/adb/modules/vowifi_stack/watchdog.disabled. Its own flock enforces one copy.
+if [ ! -f "$MODDIR/watchdog.disabled" ] &&
+   [ -f /data/local/tmp/phh_watchdog.sh ] &&
    [ "$(ps -A -o ARGS 2>/dev/null | grep -c '^sh /data/local/tmp/phh_watchdog\.sh')" = "0" ]; then
   setsid sh /data/local/tmp/phh_watchdog.sh >/dev/null 2>&1 < /dev/null &
   echo "  watchdog started"

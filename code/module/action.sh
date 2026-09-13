@@ -31,11 +31,10 @@ fi
 
 echo
 echo "--- reading the numbers ---"
-echo "healthy idle: 1-2 estab sockets + 1 listening, SAs non-zero split across"
-echo "two reqids, dangling=0, capabil.=11 (Voice|Video|SMS)."
+echo "healthy idle: >=1 estab socket + 1 listening, SAs in two UID groups,"
+echo "dangling=0, recent registration grant, one watchdog."
 echo
 echo "SAs=0        -> no tunnel. Is WiFi calling enabled in Settings?"
-echo "capabil. empty or not 11 -> the IMS service is not reporting to the"
-echo "                framework; check the boot log above for permission warnings."
+echo "A local health check does not verify calls, delivery, or billed account activity."
 echo "dangling>0   -> an xfrm policy points at a dead SA. Usually transient right"
 echo "                after a network change; only a leak if it persists."

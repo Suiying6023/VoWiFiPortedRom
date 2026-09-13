@@ -9,7 +9,11 @@ Apply: patch -p1 < floss-ims-local.patch      (from the repo root)
 Verified: applies with zero fuzz to c180bdf and round-trips to the exact source
 these APKs were built from. State as of v43.
 
-WHAT WORKS with this patch: SIP registration over a real ePDG tunnel, SMS in
+Maintenance scope (2026-09-13): registration and SMS. The user reports current
+incoming and outgoing call failures; historical voice results below are not a
+current voice-availability guarantee.
+
+HISTORICAL TEST RESULTS with this patch: SIP registration over a real ePDG tunnel, SMS in
 both directions, and outgoing VOICE CALLS (dialled 191, connected, two-way AMR
 audio, correct call timer). Incoming calls are code-reviewed and hardened but
 were broken until v42 -- see below -- and the fix is not yet re-tested with a

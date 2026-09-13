@@ -1,4 +1,7 @@
 $ErrorActionPreference = 'Stop'
+if (-not $env:MINQNS_KEYSTORE_PASSWORD) {
+    throw 'Set MINQNS_KEYSTORE_PASSWORD before building; signing material stays local.'
+}
 
 $root = $PSScriptRoot
 $jdk  = 'D:\Code\Claude Code\ksu-work\jdk\jdk-21.0.12+8\bin'
@@ -46,10 +49,10 @@ Write-Output '=== 5/6 add classes.dex + zipalign ==='
 Write-Output '=== 6/6 sign ==='
 $ks = Join-Path $root 'qns.keystore'
 if (-not (Test-Path $ks)) {
-    & "$jdk\keytool.exe" -genkeypair -keystore $ks -alias qns -storepass qns123 -keypass qns123 `
+    & "$jdk\keytool.exe" -genkeypair -keystore $ks -alias qns -storepass:env MINQNS_KEYSTORE_PASSWORD -keypass:env MINQNS_KEYSTORE_PASSWORD `
         -dname "CN=MinQns" -keyalg RSA -keysize 2048 -validity 3650
 }
-& "$bt\apksigner.bat" sign --ks $ks --ks-key-alias qns --ks-pass pass:qns123 --key-pass pass:qns123 `
+& "$bt\apksigner.bat" sign --ks $ks --ks-key-alias qns --ks-pass env:MINQNS_KEYSTORE_PASSWORD --key-pass env:MINQNS_KEYSTORE_PASSWORD `
     --out (Join-Path $build 'minqns.apk') (Join-Path $build 'minqns-aligned.apk')
 
 Write-Output '=== verify ==='

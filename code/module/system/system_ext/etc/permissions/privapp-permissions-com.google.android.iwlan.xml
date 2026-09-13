@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Privileged permissions for the AOSP Iwlan port.
+
+  MANAGE_IPSEC_TUNNELS is what lets it build the ePDG tunnel. It is declared in
+  Iwlan's own manifest but was missing from this allowlist, so the /data/app
+  deployment had to be granted it at runtime with `cmd appops set ... allow`.
+  As a priv-app it is granted from here instead and survives a reboot.
+-->
+<permissions>
+    <privapp-permissions package="com.google.android.iwlan">
+        <permission name="android.permission.MANAGE_IPSEC_TUNNELS"/>
+        <permission name="android.permission.READ_PRIVILEGED_PHONE_STATE"/>
+        <permission name="android.permission.MODIFY_PHONE_STATE"/>
+        <permission name="android.permission.CONNECTIVITY_USE_RESTRICTED_NETWORKS"/>
+        <permission name="android.permission.SCHEDULE_EXACT_ALARM"/>
+    </privapp-permissions>
+</permissions>
