@@ -4,7 +4,7 @@
 # Usage: ./build_floss.sh   (run from _fix/; outputs floss-ims-vN.apk)
 set -e
 source "/d/Code/Claude Code/tools/env/toolchain.sh"
-cd "/d/Code/Claude Code/ksu-work/qns-study/floss-ims/_fix"
+cd "/d/Code/Archive/VoWiFiPortedRom/ksu-work/qns-study/floss-ims/_fix"
 
 S="../ims-main/app/src/main/java"
 if [ -z "$1" ]; then echo "usage: build_floss.sh <version-number>   e.g. 25" >&2; exit 2; fi
@@ -81,6 +81,6 @@ for item in zin.infolist():
 zout.close(); zin.close()
 PY
 zipalignw -p -f 4 fX-unsigned.apk fX-aligned.apk 2>&1 | head -1
-apksignerw sign --ks /d/Code/Claude\ Code/ksu-work/qns-study/floss-ims/floss.keystore \
+apksignerw sign --ks /d/Code/Archive/VoWiFiPortedRom/ksu-work/qns-study/floss-ims/floss.keystore \
   --ks-pass pass:YOUR_KEYSTORE_PASSWORD --ks-key-alias floss --out "floss-ims-${VER}.apk" fX-aligned.apk 2>&1 | head -1
 md5sum "floss-ims-${VER}.apk"
