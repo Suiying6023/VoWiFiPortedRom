@@ -280,6 +280,31 @@ docs/module-internals.md             模块的实现细节与设计取舍
 以及任何从 ROM 抽出来的 `framework.jar`/dex。
 适配时本就需要目标 ROM 自身的 framework jar，而转发 vendor 的文件并不合适。
 
+## 语音阶段：先确认呼叫有没有进 IMS
+
+注册成功、短信可收发，不等于语音可用——**这两条路的入口不同**。拨号时先看这一条：
+
+```sh
+dumpsys telecom | grep 'voip='
+```
+
+`voip=false` 表示这通呼叫走了 **CS 域**，根本没有交给 IMS。此时 radio 缓冲里不会有任何
+`INVITE`，无论等多久都不会通。**先解决路由，再去查 SIP**，否则会在错误的层面上排查很久。
+
+同一时刻要交叉验证：`dumpsys telecom` 的 `tpac=` 是否为 `TelephonyConnectionService`、
+`dumpsys carrier_config` 的 `carrier_wfc_ims_available_bool` 与
+`carrier_default_wfc_ims_roaming_enabled_bool` 是否为 `true`（漫游场景两者都要）、
+以及 `ImsMmTelManager` 视角下的 WFC 开关。
+
+**一个尚未验证的疑点**：P-CSCF 在 `200 OK` 的 Contact 里会回
+`+g.3gpp.accesstype="cellular"`，即网络把这条注册归类为蜂窝接入。而本项目的
+`SipHandler` 构建 Contact 时**没有发送 `+g.3gpp.accesstype` 参数**（3GPP TS 24.229 要求带，
+WLAN 应写 `IEEE-802.11`）。在"禁止漫游 VoWiFi"的运营商上，这可能是语音被拒的原因。
+验证方式是补上该参数后重编译复测，需保留回滚路径。
+
+注意 `No ImsMediaManager ... continuing without media` 是 Android 17 缺少
+`android.telephony.imsmedia.ImsMediaManager` 时的**预期回退**，不影响 SIP 注册，不是故障。
+
 ## 诚实的适用范围
 
 当前接打电话仍失败；下面的拨出结果是历史实验样本。完整语音能力尚未通过当前验收。
