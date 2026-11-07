@@ -45,16 +45,11 @@ phh 补丁基于 `phhusson/ims` 的 `c180bdf`；其权限来自手写 manifest �
 可在模块目录创建 `watchdog.disabled`，下次启动不再启动看门狗，升级时保留这一选择。
 此文件不主动停止已经运行的实例。
 
-## WiFi 省电守卫（2026-10-19）
+## 运行时补充记录的归档边界
 
-`tools/wifi_ps_off.sh` 每 300 秒执行一次 `iw dev wlan0 set power_save off`，由 `service.sh`
-在启动看门狗后拉起（带 `ps` 判重，`setsid` 脱离）。
+2026-10-19的设备记录提到WiFi省电守卫和通话诊断工具。2026-11-07离线审阅本仓`fa25ac7`：`code/module/service.sh`没有启动省电守卫的逻辑，`code/diagnostics/`没有`wifi_ps_off.sh`和`call_trace.sh`，打包器也未将它们纳入v7 ZIP。
 
-原因是省电模式下 radio 会在两次健康检查之间休眠，IWLAN socket 随之被掐断，
-表现为周期性 `no-listener` 并触发一次 force-stop。关闭省电后该故障频率明显下降。
-必须周期重设：WiFi 重连会恢复驱动默认值。
-
-代价是待机功耗略升；对保号用途的常驻设备可以接受。
+因此本仓可重建的是上文的v7注册/短信维护基线；10月设备运行时补充尚缺对应源码归档。后续需要恢复这些补充时，先取得实际脚本与当时部署依据，再决定是否纳入新版本。该缺口不通过猜测重写脚本补齐。
 
 ## 检查与卸载
 
@@ -65,19 +60,7 @@ su -c 'sh /data/local/tmp/test_cc_injection.sh'
 
 第二条只在临时副本上验证注入、幂等性和缺键修复，不编辑正在使用的缓存。
 
-**通话诊断（2026-10-19 追加）**：`/data/local/tmp/call_trace.sh` 抓单次通话的完整证据链。
-
-```sh
-su -c 'sh /data/local/tmp/call_trace.sh start'   # 拨号前：设标记并清空 radio 缓冲
-# 拨号（191 免费）
-su -c 'sh /data/local/tmp/call_trace.sh stop'    # 挂断后：结果落在 /data/local/tmp/call_trace_*.log
-```
-
-导出内容：SIP 信令序列（INVITE / PRACK / 1xx / 4xx）、媒体路径（编解码 / RTP / 麦克风）、
-框架侧 Telecom 状态、异常、当前 IPsec 与注册状态、通话后 SA 计数。
-
-**判读要点**：`dumpsys telecom` 里通话记录的 `voip=false` 表示该呼叫走的是 CS 域而非 IMS——
-此时 radio 缓冲里不会有 INVITE，问题不在 SIP 栈，而在框架没把呼叫路由给 IMS。
+历史通话记录只能说明当时的呼叫路径；本次没有重放呼叫或核验设备上是否仍有诊断脚本。`voip=false`和日志中缺少INVITE分别是框架与捕获窗口的线索，结合实际IMS服务和完整日志判断，不能单凭一项推广为所有语音失败原因。
 
 正常卸载应通过 KernelSU 管理器触发 `uninstall.sh`，以还原配置备份、移除白名单并停止看门狗。
 早期备份可能已经包含本模块的值；还原时会去除这些引用，避免卸载后仍绑定已不存在的提供方。
