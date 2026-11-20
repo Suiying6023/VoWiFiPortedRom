@@ -37,6 +37,6 @@ echo "  incall    : $(phh_incall) (all SIMs; unknown vetoes recovery)"
 
 echo "== monitor =="
 echo "  watchdogs : $(phh_watchdogs)"
-echo "  last act  : $(grep 'force-stop' /data/local/tmp/phh_watchdog.log 2>/dev/null | tail -1)"
+echo "  last act  : $(grep -E -- '-> (force-stop|restart)' /data/local/tmp/phh_watchdog.log 2>/dev/null | tail -1)"
 sh "${0%/*}/phh_health.sh"
 echo "Local health does not validate voice calls, SMS delivery, or account activity."

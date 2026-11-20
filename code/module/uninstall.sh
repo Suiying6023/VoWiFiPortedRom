@@ -5,9 +5,10 @@ MODDIR=${0%/*}
 DIR=/data/user_de/0/com.android.phone/files
 RESULT=0
 
-for P in $(ps -A -o PID,ARGS 2>/dev/null | awk '$2 == "sh" && $3 == "/data/local/tmp/phh_watchdog.sh" {print $1}'); do
+for P in $(ps -A -o PID,ARGS 2>/dev/null | awk '$2 == "sh" && ($3 == "/data/local/tmp/phh_watchdog.sh" || $3 == "/data/local/tmp/wifi_ps_off.sh") {print $1}'); do
   kill -9 "$P" 2>/dev/null
 done
+iw dev wlan0 set power_save on 2>/dev/null
 
 for F in "$DIR"/carrierconfig-*.xml; do
   [ -f "$F" ] || continue

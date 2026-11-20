@@ -1,6 +1,6 @@
 id=vowifi_stack
 name=VoWiFi stack (Iwlan + floss-ims + MinQns)
-version=v7-v43-iwlan13
-versionCode=7
+version=v10-v46-autoslot
+versionCode=10
 author=local
-description=VoWiFi registration and SMS maintenance for diting / HyperOS port / API 37. Iwlan v13 + phh v43 + MinQns. Includes guarded recovery and carrier configuration. Voice calls remain unreliable; account activity requires a confirmed billed event or top-up.
+description=VoWiFi registration and SMS for diting / HyperOS port / API 37. Dual-SIM selection, IMS network recovery, and P-CSCF failover. phh v46 is pending device validation; voice calls remain unreliable.

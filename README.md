@@ -12,8 +12,13 @@
 
 ## 安装与检查
 
-下载 [Release 模块](https://github.com/Suiying6023/VoWiFiPortedRom/releases/latest)，在 KernelSU 中安装后重启。
-v7 包含手机实际使用的 **Iwlan v13、phh v43 和 MinQns v1**，以及三个组件的权限白名单。
+下载 [Release 模块](https://github.com/Suiying6023/VoWiFiPortedRom/releases)，在 KernelSU 中安装后重启。
+当前源码打包 **模块 v10：Iwlan v13、phh v46、MinQns v1**。支持按卡槽绑定订阅，
+为非中国大陆 SIM 配置 Wi-Fi Calling，保留中国大陆 SIM 的原厂 IMS。
+
+v10 修复 SIP 超时、备用 P-CSCF 切换、网络更换和服务解绑后的资源清理，以及订阅 ID 解析。
+v45 已在实机验证注册、刷新和看门狗恢复；v46 已完成编译、签名与打包检查，发布为预发布版本。
+**[待核实] v46 实机注册、双卡切换、短信收发及长期待机。**
 
 在模块的 Action 中查看状态，或运行：
 
@@ -40,12 +45,13 @@ python code/build/package_module.py
 python -m unittest discover -s code/tests -v
 ```
 
-输出为 `code/module/vowifi-stack-v7.zip`。打包前验证载荷 SHA-256，ZIP 内附完整校验清单。
+输出为 `code/module/vowifi-stack-v10-autoslot.zip`。打包前验证载荷 SHA-256，ZIP 内附完整校验清单。
 脚本、诊断工具、三个 APK 和权限文件分别保存在 `code/module/`、`code/diagnostics/`；
 生成的 ZIP 不重复存入 Git，发布到 Release。
 
 phh 的源码补丁与构建参考见 `code/patches/`、`code/build/`，最小 QNS 源码见 `code/minqns/`。
-重新编译 APK 仍需目标 ROM 的框架文件与本地 Android 工具链；与上述打包步骤不同。
+重新编译 APK 仍需目标 ROM 的框架文件与本地 Android 工具链，并通过环境变量
+`PHH_SIGNING_PASSWORD` 提供本地签名密码；这些输入不包含在仓库中。
 
 部署细节见 [模块说明](docs/module-internals.md)，移植过程见 [PORTING-GUIDE.md](PORTING-GUIDE.md)。
 项目脚本及 phh 衍生补丁按 GPL-2.0 发布，见 [LICENSE](LICENSE)。

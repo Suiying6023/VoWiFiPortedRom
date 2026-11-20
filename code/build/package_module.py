@@ -26,7 +26,7 @@ def payload():
         files[path.name] = path.read_bytes().replace(b'\r\n', b'\n')
     files['module.prop'] = (MODULE/'module.prop').read_bytes().replace(b'\r\n', b'\n')
     for name in ('phh_common.sh', 'phh_health.sh', 'phh_status.sh', 'phh_watchdog.sh',
-                 'test_cc_injection.sh'):
+                 'test_cc_injection.sh', 'wifi_ps_off.sh'):
         files['tools/'+name] = (REPO/'code/diagnostics'/name).read_bytes().replace(b'\r\n', b'\n')
     files['README.md'] = (REPO/'docs/module-internals.md').read_bytes().replace(b'\r\n', b'\n')
     files['maintenance.md'] = (REPO/'docs/maintenance.md').read_bytes().replace(b'\r\n', b'\n')
@@ -40,14 +40,14 @@ def payload():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--output', type=Path, default=MODULE/'vowifi-stack-v7.zip')
+    parser.add_argument('--output', type=Path, default=MODULE/'vowifi-stack-v10-autoslot.zip')
     args = parser.parse_args()
     files = payload()  # Validate every input before opening the output.
     args.output.parent.mkdir(parents=True, exist_ok=True)
     temporary = args.output.with_name(args.output.name+'.tmp')
     with zipfile.ZipFile(temporary, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as z:
         for name, data in sorted(files.items()):
-            info = zipfile.ZipInfo(name, date_time=(2026, 9, 13, 0, 0, 0))
+            info = zipfile.ZipInfo(name, date_time=(2026, 11, 20, 0, 0, 0))
             info.create_system = 3
             info.external_attr = (0o100755 if name.endswith('.sh') else 0o100644) << 16
             info.compress_type = zipfile.ZIP_DEFLATED

@@ -2,13 +2,17 @@
 # Build floss-ims from source: Kotlin+Java -> dex -> repack into targetSdk-28
 # base (v28test/f17-unsigned.apk) -> align -> sign.
 # Usage: ./build_floss.sh   (run from _fix/; outputs floss-ims-vN.apk)
-set -e
-source "/d/Code/Claude Code/tools/env/toolchain.sh"
+set -euo pipefail
+REPO=$(cd "$(dirname "$0")/../.." && pwd)
+: "${PHH_SIGNING_PASSWORD:?Set PHH_SIGNING_PASSWORD before building}"
+source "/d/Code/Tools/common/env/toolchain.sh"
 cd "/d/Code/Archive/VoWiFiPortedRom/ksu-work/qns-study/floss-ims/_fix"
 
 S="../ims-main/app/src/main/java"
-if [ -z "$1" ]; then echo "usage: build_floss.sh <version-number>   e.g. 25" >&2; exit 2; fi
-VER="v$1"
+if [ -z "${1:-}" ]; then echo "usage: build_floss.sh <version-number>   e.g. 25" >&2; exit 2; fi
+VERSION="$1"
+VER="v$VERSION"
+AAPT2="$BUILD_TOOLS/aapt2.exe"
 
 # Fail loudly if a build input is missing. These are all artifacts produced by
 # earlier sessions, not checked-in sources, so a missing one used to yield a
@@ -64,23 +68,29 @@ if ! d8w --min-api 30 --output "$(cygpath -w dexX)" --lib "$(cygpath -w ../ims-m
 fi
 [ -s dexX/classes.dex ] || { echo "d8 produced no classes.dex" >&2; exit 1; }
 
+"$AAPT2" link -I "$(cygpath -w "$ANDROID_JAR")" \
+  --manifest "$(cygpath -w "$REPO/code/build/AndroidManifest.xml")" \
+  --min-sdk-version 32 --target-sdk-version 28 --version-code "$VERSION" \
+  --version-name "$VER" -o "$(cygpath -w manifest-versioned.apk)"
 python3 - "$VER" <<'PY'
 import zipfile, os, sys
 src, dst, newdex = "v28test/f17-unsigned.apk", "fX-unsigned.apk", "dexX/classes.dex"
 if os.path.exists(dst): os.remove(dst)
 data = open(newdex, "rb").read()
+manifest = zipfile.ZipFile("manifest-versioned.apk").read("AndroidManifest.xml")
 zin = zipfile.ZipFile(src); zout = zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED)
 for item in zin.infolist():
     base = item.filename.split("/")[-1]
     if item.filename.startswith("META-INF/") and base.endswith((".RSA", ".SF", ".MF")): continue
-    payload = data if item.filename == "classes.dex" else zin.read(item.filename)
+    payload = data if item.filename == "classes.dex" else manifest if item.filename == "AndroidManifest.xml" else zin.read(item.filename)
     zi = zipfile.ZipInfo(item.filename, date_time=item.date_time)
     zi.compress_type = zipfile.ZIP_STORED if item.filename.endswith((".so", ".arsc")) else zipfile.ZIP_DEFLATED
     zi.external_attr = item.external_attr
     zout.writestr(zi, payload)
 zout.close(); zin.close()
 PY
-zipalignw -p -f 4 fX-unsigned.apk fX-aligned.apk 2>&1 | head -1
+zipalignw -p -f 4 fX-unsigned.apk fX-aligned.apk
 apksignerw sign --ks /d/Code/Archive/VoWiFiPortedRom/ksu-work/qns-study/floss-ims/floss.keystore \
-  --ks-pass pass:YOUR_KEYSTORE_PASSWORD --ks-key-alias floss --out "floss-ims-${VER}.apk" fX-aligned.apk 2>&1 | head -1
-md5sum "floss-ims-${VER}.apk"
+  --ks-pass env:PHH_SIGNING_PASSWORD --ks-key-alias floss --out "floss-ims-${VER}.apk" fX-aligned.apk
+apksignerw verify "floss-ims-${VER}.apk"
+sha256sum "floss-ims-${VER}.apk"

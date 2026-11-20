@@ -22,7 +22,7 @@ recover() {
   # The earlier sample can be stale: re-read all SIMs immediately before acting.
   CALL=$(phh_incall)
   if [ "$CALL" != "0" ]; then
-    note "-> NOT force-stopping ($1): incall=$CALL"
+    note "-> NOT restarting ($1): incall=$CALL"
     return
   fi
   phh_wifi_ready || return
@@ -32,8 +32,13 @@ recover() {
     return
   fi
   LAST_RECOVERY=$NOW
-  note "-> force-stop ($1)"
-  am force-stop me.phh.ims
+  PID=$(phh_pid)
+  note "-> restart ($1)"
+  if [ -n "$PID" ]; then
+    kill "$PID"
+  else
+    am startservice --user 0 -n me.phh.ims/.PhhImsService
+  fi
   sleep 150 9>&-
   OWNER=
   LAST_GRANT=0

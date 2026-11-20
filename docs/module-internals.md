@@ -1,6 +1,6 @@
 # KernelSU 模块维护说明
 
-v7 将 Iwlan v13、phh v43、MinQns v1 安装为 `system_ext/priv-app`，用于 K50U / HyperOS 移植包 / API 37。
+v10 将 Iwlan v13、phh v46、MinQns v1 安装为 `system_ext/priv-app`，用于 K50U / HyperOS 移植包 / API 37。
 当前验收范围为注册维护与短信通道，接打电话仍有用户报告的失败。
 
 ## 组件与来源
@@ -8,22 +8,27 @@ v7 将 Iwlan v13、phh v43、MinQns v1 安装为 `system_ext/priv-app`，用于 
 | 组件 | 包名 | 职责 |
 |---|---|---|
 | Iwlan v13 | `com.google.android.iwlan` | ePDG 隧道与 IMS 数据网络 |
-| phh v43 | `me.phh.ims` | SIP 注册和短信处理，含实验性语音路径 |
+| phh v46 | `me.phh.ims` | 按卡槽绑定订阅、SIP 注册和短信处理，含实验性语音路径 |
 | MinQns v1 | `com.voxi.minqns` | 向框架声明 IMS 使用 IWLAN |
 
-三个 APK 的 SHA-256 记录在源码 `code/module/payload.sha256`，与本次真机运行版本一致。
+三个 APK 的 SHA-256 记录在源码 `code/module/payload.sha256`。
 保持独立 UID 可以区分两类 IPsec SA，并支持分别恢复组件。
-phh 补丁基于 `phhusson/ims` 的 `c180bdf`；其权限来自手写 manifest 和 priv-app 白名单。
+phh 完整源码补丁基于 `phhusson/ims` 的 `c180bdf`，可直接应用后得到本次构建源码。
+构建使用 `code/build/AndroidManifest.xml` 写入 APK 版本和权限；`SCHEDULE_EXACT_ALARM`
+同时包含在 manifest 和 priv-app 白名单，避免系统开机权限校验失败。
 
 ## 安装与启动
 
 从 KernelSU 管理器安装 ZIP 后重启。特权权限由开机扫描决定。
 `customize.sh` 禁用旧 `phhimspriv`、`iwlanpriv` 模块，保留目录供恢复；`imsfix_cn` 继续提供原厂 IMS 组件。
 
-`service.sh` 等待系统启动和 carrier cache 出现，再逐份检查七个覆盖键。
+`service.sh` 等待系统启动和 carrier cache 出现，再逐份检查提供方和 WFC 覆盖键。
 `carrier-config.sh` 同时验证包名、类名、值与唯一性；缺键或错误值会修复，完整正确的缓存保持原样。
 每份缓存首次编辑前保存 `.bak.vowifi_stack`；不支持的结构拒绝写入。
-当前注入范围是该 ROM 下匹配的 carrier caches，其他双卡组合需要单独验证。
+中国大陆运营商（MCC 460）和无法识别的缓存保留原厂 IMS，并清除旧模块提供方引用。
+其余有效 PLMN 注入本模块；WFC 按订阅 `_id` 更新，卡槽 `sim_id` 只用于判断卡是否激活。
+更新同时检查常规与漫游 WFC 设置。非 MCC 460 的判断用于选卡，不能识别 SIM 卡硬件类型。
+缓存发生变化且所有卡均无通话时，脚本重启电话进程以加载配置。
 
 模块为三个包添加 deviceidle 白名单，并恢复 `/data/local/tmp` 下的诊断脚本。
 日志位置为 `/data/local/tmp/vowifi_stack_boot.log`。
@@ -35,7 +40,7 @@ phh 补丁基于 `phhusson/ims` 的 `c180bdf`；其权限来自手写 manifest �
 - 所有 SIM 均空闲且 WiFi 有地址时，才允许恢复；状态未知同样禁止操作。
 - 恢复前重新读取通话状态，避免使用几秒前的快照。
 - 注册期限取自当前进程的实际授权事件。重复读取旧日志不会刷新时间戳。
-- 暂时丢失监听先复查；每次恢复后至少冷却 900 秒。
+- 暂时丢失监听先复查；存活进程用 `kill` 退出并由 IMS 绑定拉起，进程已不存在时启动 `PhhImsService`。每次恢复后至少冷却 900 秒。
 - 文件锁限制为一个实例；自身日志限制约 64 KiB。
 
 `phh_last_grant` 保存真实授权事件的 epoch 秒数。看门狗重启且当前日志里没有事件时，
@@ -45,11 +50,33 @@ phh 补丁基于 `phhusson/ims` 的 `c180bdf`；其权限来自手写 manifest �
 可在模块目录创建 `watchdog.disabled`，下次启动不再启动看门狗，升级时保留这一选择。
 此文件不主动停止已经运行的实例。
 
-## 运行时补充记录的归档边界
+## SIP 连接与生命周期
 
-2026-10-19的设备记录提到WiFi省电守卫和通话诊断工具。2026-11-07离线审阅本仓`fa25ac7`：`code/module/service.sh`没有启动省电守卫的逻辑，`code/diagnostics/`没有`wifi_ps_off.sh`和`call_trace.sh`，打包器也未将它们纳入v7 ZIP。
+TCP 连接超时为 10 秒，注册握手读取超时为 15 秒；注册成功后取消读取超时。
+连接 I/O 失败或注册未成功时，清理本次资源并尝试下一个运营商下发的 P-CSCF，
+按远端地址族选择本地地址。缺少 P-CSCF 时等待网络属性更新。
 
-因此本仓可重建的是上文的v7注册/短信维护基线；10月设备运行时补充尚缺对应源码归档。后续需要恢复这些补充时，先取得实际脚本与当时部署依据，再决定是否纳入新版本。该缺口不通过猜测重写脚本补齐。
+网络回调按到达顺序处理，连接使用回调携带的网络属性。旧连接的消息和读取线程
+不会接管新连接；服务解绑时注销网络请求、关闭已接收连接并释放 IPsec 资源。
+刷新闹钟在连接断开时重建连接，双卡情况下采用较短的刷新间隔。
+
+## WiFi 省电守卫
+
+v10 收录此前设备运行包中的 `wifi_ps_off.sh`，由 `service.sh` 启动，
+每 300 秒执行 `iw dev wlan0 set power_save off`。卸载时停止进程并恢复省电模式。
+`call_trace.sh` 未包含在发行包中。
+
+## 验证记录
+
+2026-11-19：phh v45 实机完成注册、3590 秒租约刷新和看门狗恢复；联通卡 NR_SA
+与英国卡 IWLAN 同时在线，状态为 1 个已建立连接、1 个监听、0 项悬空策略。
+该次强制重建 IWLAN 后由看门狗重启 IMS 才恢复，未完成同进程网络更换的验收。
+
+2026-11-20：v46 完成源码审查、编译、APK 签名校验和模块打包校验，完整补丁可还原构建源码。
+本版修正订阅 ID 误读、错误卡槽回退、网络事件顺序、服务退出清理和 APK manifest 版本。
+本轮未连接目标手机，因此发布为预发布版本。
+
+**[待核实] v46 实机注册、P-CSCF 故障切换、双卡更换、真实短信收发和长期待机。**
 
 ## 检查与卸载
 
@@ -66,4 +93,6 @@ su -c 'sh /data/local/tmp/test_cc_injection.sh'
 早期备份可能已经包含本模块的值；还原时会去除这些引用，避免卸载后仍绑定已不存在的提供方。
 直接删除模块目录会绕过恢复步骤。回滚到旧独立模块时，需要按原来的启用状态恢复它们并重启。
 
-本模块不设置 APN、ePDG 地址或漫游开关。保号以账户的有效活动记录为准，见 [保号与维护](maintenance.md)。
+本模块不设置 APN、ePDG 地址或蜂窝数据漫游开关；会为选中的非 MCC 460 订阅启用 WFC 和 WFC 漫游，设为 WIFI_ONLY。
+卸载恢复 carrier cache，订阅数据库中的 WFC 偏好可在系统设置中调整。
+保号以账户的有效活动记录为准，见 [保号与维护](maintenance.md)。

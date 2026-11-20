@@ -1,141 +1,41 @@
-Local changes to phhusson/ims (floss-ims), for VoWiFi on a Redmi K50 Ultra
-running a ported HyperOS / Android 17 with a UK VOXI eSIM.
+Local changes to phhusson/ims for diting / HyperOS / Android 17.
+Base: https://github.com/phhusson/ims commit c180bdff810880d8f75f5dda70e6bcbee6991e9e
+Apply from the upstream root: git apply floss-ims-local.patch
+Source version: phh v46, module v10 (2026-11-20).
+Includes dual-SIM routing, SIP timeout/failover, network lifecycle and alarm fixes.
+Device evidence and pending checks are recorded in docs/module-internals.md.
 
-Base:  https://github.com/phhusson/ims  commit c180bdf ("Handle having require
-       being on multiple lines", 2025-01-15)
-       NOTE the repo is phhusson/ims -- phhusson/floss-ims is a 404.
-Apply: patch -p1 < floss-ims-local.patch      (from the repo root)
-
-Verified: applies with zero fuzz to c180bdf and round-trips to the exact source
-these APKs were built from. State as of v43.
-
-Maintenance scope (2026-09-13): registration and SMS. The user reports current
-incoming and outgoing call failures; historical voice results below are not a
-current voice-availability guarantee.
-
-HISTORICAL TEST RESULTS with this patch: SIP registration over a real ePDG tunnel, SMS in
-both directions, and outgoing VOICE CALLS (dialled 191, connected, two-way AMR
-audio, correct call timer). Incoming calls are code-reviewed and hardened but
-were broken until v42 -- see below -- and the fix is not yet re-tested with a
-real inbound call.
-
-=== Voice calls ===
-  * SipHandler: fix the RFC 3312 precondition handshake. In a response the peer
-    sends us, "local" is the PEER and "remote" is US -- upstream read them the
-    other way round and only acted when the peer reported ITS OWN side as not
-    ready. Vodafone's first 183 already says "a=curr:qos local sendrecv" plus
-    "a=conf:qos remote sendrecv" (I am ready, now confirm you are), so upstream
-    answered nothing and the network failed the call with 580 Precondition
-    Failure. This is what stopped calls from working at all.
-  * SipHandler: build the precondition UPDATE from OUR OWN SDP. Upstream edited
-    the peer's SDP and sent it back, so the UPDATE advertised the NETWORK's
-    connection address and RTP port as ours -> 403 Forbidden. Also drop Route
-    (in-dialog request) and the registration-shaped Expires.
-  * PhhMmTelFeature + SipHandler: report an answered OUTGOING call to the
-    framework (new onCallConnected -> callSessionInitiated). Only incoming calls
-    ever published a listener, so Telecom kept outgoing calls at DIALING for
-    their whole duration and logged duration=0 -- a stale entry then sat in
-    dumpsys telecom looking like a call still in progress.
-  * SipHandler: stopCallMedia() tears the media path down on every exit path
-    (failure, CANCEL, BYE, reject, terminate). Codec threads start on the 183,
-    well before the call is answered, and upstream's failure path only notified
-    the framework -- so each failed call stranded an AudioRecord, two MediaCodecs
-    and the RTP reader. Closing rtpSocket is the load-bearing part: the decode
-    thread blocks in receive() and would never reach its own stop check.
-  * SipHandler: media threads release in a finally. They normally exit BY
-    throwing (socket closed), so releasing after the loop never ran -- leaving
-    the microphone held for the life of the process.
-  * SipHandler: log the RTP stream once, not once per packet. Upstream logged
-    two lines per 20ms frame (~100 lines/s, 19744 for one call), which buries
-    the rest of the radio log and is indistinguishable from the main-socket spin
-    failure below -- our own watchdog read it as a spin and force-stopped a
-    working call.
-
-  * SipHandler: reset callStopped/callStarted at the start of an OUTGOING call.
-    handleCall (incoming) always did this; the outgoing path never has, which did
-    not matter until every teardown path started calling stopCallMedia(). The
-    flag then survived the previous call, so the NEXT call's encode thread saw it
-    already set and skipped opening the microphone: the call connected with audio
-    one way only. Symptom is "connected but no sound", and only from the second
-    call onwards -- the first call after a restart is always fine, which makes it
-    easy to misread as a network problem. (v43)
-
-=== Two bugs that broke real calls, found 2026-08-23 22:2x (v42) ===
-  * SipHandler: the SDP o= line in the INCOMING-call answer was malformed.
-    Upstream emitted "o=<imsi> 1 2 IN IP4 <addr>" -- five fields where RFC 4566
-    requires six (username, sess-id, sess-version, nettype, addrtype, address).
-    Vodafone replied to our 183 with
-    CANCEL Reason: SIP;cause=200;text="Invalid SDP" about 2s after it rang, so
-    EVERY incoming call dropped the moment it appeared, and the caller saw "call
-    failed". Now "o=- 1 2 ..." like the two outgoing builders that already work.
-  * SipHandler: outgoing calls to full international numbers lost the leading +.
-    The framework hands the number over already stripped ("44xxxxxxxxxx") and
-    upstream passed it straight into tel:, which RFC 3966 reads as a LOCAL
-    number -- Vodafone answered 404 Not Found. The + is restored only for
-    all-digit numbers of 11+ digits not starting with 0, so short codes (191)
-    and national-format numbers (07...) are left alone. Both cases re-tested.
-
-=== Incoming calls / crash-safety (v40-v41) ===
-  * SipHandler: rejectCall() tears the media down. handleCall starts the codec
-    threads while the phone is still ringing (it must, for early media), so
-    declining a call leaked a whole pipeline.
-  * SipHandler: acceptCall/rejectCall no longer do `currentCall!!`. Both run on
-    their own thread, where an NPE is silent: the caller can hang up first, and
-    the result is a call that never connects with nothing logged.
-  * SipHandler: handleUpdate answers 481 instead of throwing when no call is in
-    progress. It runs on the control-socket reader, so an NPE there kills the
-    loop that carries the whole registration.
-  * PhhMmTelFeature: reject()/terminate() report callSessionTerminated, so the
-    incoming-call UI does not hang after the user declines.
-  * SipHandler: BOTH media threads are bare thread{} bodies, so an escaping
-    exception is a process-killing FATAL EXCEPTION, not a caught teardown. The
-    encode thread's pre-answer keepalive loop and the decode thread's
-    `currentCall!!` were OUTSIDE the try -- hanging up during early media crashed
-    the whole process and took the SIP registration with it (reproduced on v40,
-    fixed and re-tested on v41). Both are now inside, and the mic is never
-    opened if the call ended while ringing.
-
-=== Registration reliability ===
-  * SipHandler: honour parseMessage()'s return value on the main/control socket.
-    Upstream discards it, so when the P-CSCF closes the connection (hourly here)
-    the reader spun at 100% CPU forever and the registration went dead while the
-    process stayed alive.
-  * SipHandler: reconnect after the peer closes the control socket, guarded by a
-    generation counter (stale readers cannot rebuild) and exponential backoff
-    (2s..120s, reset after 10min of stability).
-  * SipHandler: releaseConnection() frees the sockets, SPIs and IPsec transforms
-    of the previous attempt -- upstream never reconnects so it never frees them,
-    and sec-agree SAs carry no lifetime, so the kernel never expires them.
-    Also called on both connect() failure paths and at connect() entry.
-  * SipHandler: connect() serialised behind a lock -- three threads reach it.
-  * SipHandler: the two server-socket reader loops capture their socket and stop
-    on generation change, instead of re-reading fields connect() reassigns (an
-    old loop would serve the NEW listener and race the fresh reader).
-  * PhhImsService: refresh registration at half the expiry the network actually
-    granted (Vodafone UK grants 3590s; upstream's fixed 3000s alarm plus MIUI's
-    alarm slack let the binding lapse, silently dropping incoming SMS).
-
-=== Platform / HyperOS ===
-  * SipConnection: SipConnectionTcpServer built on a raw FileDescriptor via
-    android.system.Os. Android 17 removed the hidden getFileDescriptor$ method
-    upstream reflected on, and the NIO channel's fd field is blocklisted.
-    accept() uses that FD; close() closes it (the ServerSocket is a placeholder).
-  * SipConnection: Tcp/Udp close() also close their own IPsec transforms.
-  * PhhImsService: declare features via querySupportedImsFeatures() rather than
-    manifest metadata.
-  * PhhMmTelFeature / PhhMmTelFeatureProtected: HyperOS's
-    notifyCapabilitiesStatusChanged differs from AOSP; the Java shim reaches the
-    protected member without tripping the hidden-API blocklist.
-  * Sms / SipMessage: SMSC field decoding (TS 24.011) and header parsing fixes.
-
-Not in this patch (packaging, not source): _fix/manifest/AndroidManifest.xml,
-_fix/pack_apk.py, _fix/build_floss_v27.sh. Bring those too -- targetSdk 28 (for
-the MAX-TARGET-O hidden APIs) and RECORD_AUDIO live there, and calls need both.
-
-diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/ims/PhhImsService.kt b/app/src/main/java/me/phh/ims/PhhImsService.kt
---- a/app/src/main/java/me/phh/ims/PhhImsService.kt	2026-08-23 20:11:27.988261600 +0800
-+++ b/app/src/main/java/me/phh/ims/PhhImsService.kt	2026-08-24 00:05:02.260142800 +0800
-@@ -10,9 +10,11 @@
+diff --git a/app/src/main/java/me/phh/ims/PhhImsBroadcastReceiver.kt b/app/src/main/java/me/phh/ims/PhhImsBroadcastReceiver.kt
+--- a/app/src/main/java/me/phh/ims/PhhImsBroadcastReceiver.kt
++++ b/app/src/main/java/me/phh/ims/PhhImsBroadcastReceiver.kt
+@@ -19,13 +19,13 @@
+     override fun onReceive(ctxt: Context, intent: Intent) {
+         Rlog.d(TAG, "Alarm fired with ${intent.action}")
+         if (intent.action == ALARM_PERIODIC_REGISTER) {
+-            val imsService = PhhImsService.Companion.instance!!
++            val imsService = PhhImsService.Companion.instance ?: return
+             // rearm alarm
+             imsService.armPeriodicRegisterAlarm()
+             // XXX take some lock until this comes back?
+             // (not function return, but callback after notify)
+             CoroutineScope(Dispatchers.IO).launch {
+-                imsService.mmTelFeature?.sipHandler?.register()
++                imsService.mmTelFeatures.values.forEach { it.initializedSipHandler?.refreshRegistration() }
+             }
+             return
+         }
+diff --git a/app/src/main/java/me/phh/ims/PhhImsService.kt b/app/src/main/java/me/phh/ims/PhhImsService.kt
+--- a/app/src/main/java/me/phh/ims/PhhImsService.kt
++++ b/app/src/main/java/me/phh/ims/PhhImsService.kt
+@@ -1,6 +1,7 @@
+ //SPDX-License-Identifier: GPL-2.0
+ package me.phh.ims
+ 
++import java.util.concurrent.ConcurrentHashMap
+ import android.app.AlarmManager
+ import android.app.PendingIntent
+ import android.content.Context
+@@ -10,9 +11,11 @@
  import android.os.SystemClock
  import android.telephony.Rlog
  import android.telephony.ims.ImsService
@@ -147,10 +47,12 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/ims/PhhImsS
  import android.telephony.ims.stub.ImsRegistrationImplBase
  import android.telephony.imsmedia.ImsMediaManager
  
-@@ -22,6 +24,17 @@
+@@ -20,6 +23,18 @@
+     companion object {
+         private const val TAG = "PHH ImsService"
          var instance: PhhImsService? = null
-     }
- 
++    }
++
 +    // Upstream declares its features in the manifest metadata, which makes
 +    // ImsResolver treat them as static. Overriding this makes the resolver query
 +    // us over AIDL instead, which is what a carrier-config override needs in
@@ -159,13 +61,12 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/ims/PhhImsS
 +        Rlog.d(TAG, "querySupportedImsFeatures")
 +        return ImsFeatureConfiguration.Builder()
 +            .addFeature(0, ImsFeature.FEATURE_MMTEL)
++            .addFeature(1, ImsFeature.FEATURE_MMTEL)
 +            .build()
-+    }
-+
-     val receiver: PhhImsBroadcastReceiver = PhhImsBroadcastReceiver()
+     }
  
-     override fun onCreate() {
-@@ -38,14 +51,39 @@
+     val receiver: PhhImsBroadcastReceiver = PhhImsBroadcastReceiver()
+@@ -38,26 +53,44 @@
          val intent = Intent(receiver.ALARM_PERIODIC_REGISTER)
          val pendingIntent =
              PendingIntent.getBroadcast(this, 0, intent, PendingIntent.FLAG_IMMUTABLE)
@@ -183,12 +84,11 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/ims/PhhImsS
 +        // the alarm being deferred: the binding lapsed and incoming SMS was dropped by
 +        // the network with nothing logged locally. Before the first successful REGISTER
 +        // we have no grant yet, so start with a short interval.
-+        val granted = mmTelFeature?.sipHandler?.registeredExpirySeconds ?: 0
-+        val refreshSeconds = if (granted > 0) {
-+            (granted / 2).coerceIn(60, 1800)
-+        } else {
-+            600
-+        }
++        val refreshSeconds = mmTelFeatures.values.minOfOrNull {
++            val granted = it.initializedSipHandler?.registeredExpirySeconds ?: 0
++            if (granted > 0) (granted / 2).coerceIn(60, 1800) else 600
++        } ?: 600
++
 +
 +        // setAndAllowWhileIdle still lets the OS slide the alarm by a long window (MIUI
 +        // app_standby pushed it out by >30min here), which is exactly how the binding
@@ -209,13 +109,57 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/ims/PhhImsS
 +                AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pendingIntent)
 +        }
 +        Rlog.d(TAG, "Alarm set: refresh in ${refreshSeconds}s " +
-+            "(granted=${granted}s, exact=$exact)")
++            "(exact=$exact)")
      }
  
-     // XXX one per slot id...
-diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/ims/PhhMmTelFeature.kt b/app/src/main/java/me/phh/ims/PhhMmTelFeature.kt
---- a/app/src/main/java/me/phh/ims/PhhMmTelFeature.kt	2026-08-23 20:11:27.990799100 +0800
-+++ b/app/src/main/java/me/phh/ims/PhhMmTelFeature.kt	2026-08-24 00:05:02.261143000 +0800
+-    // XXX one per slot id...
+-    var mmTelFeature: PhhMmTelFeature? = null
++    val mmTelFeatures = ConcurrentHashMap<Int, PhhMmTelFeature>()
+     override fun createMmTelFeature(slotId: Int): MmTelFeature {
+-        Rlog.d(TAG, "createMmTelFeature")
+-        var feature = mmTelFeature
+-        if (feature == null) {
+-            feature = PhhMmTelFeature(slotId)
+-            mmTelFeature = feature
+-        }
+-        return feature
++        Rlog.d(TAG, "createMmTelFeature $slotId")
++        return mmTelFeatures.computeIfAbsent(slotId) { PhhMmTelFeature(slotId) }
+     }
+     override fun createRcsFeature(slotId: Int): RcsFeature? {
+         Rlog.d(TAG, "createRcsFeature")
+@@ -78,16 +111,25 @@
+         }
+     }
+ 
+-    // XXX cache one per slot id
+-    val imsRegistration = ImsRegistrationImplBase()
++    private val imsRegistrations = ConcurrentHashMap<Int, ImsRegistrationImplBase>()
+     override fun getRegistration(slotId: Int): ImsRegistrationImplBase {
+         Rlog.d(TAG, "getRegistration $slotId")
+-        return imsRegistration
++        return imsRegistrations.computeIfAbsent(slotId) { ImsRegistrationImplBase() }
+     }
+ 
+     override fun onDestroy() {
+         Rlog.d(TAG, "onDestroy")
++        try {
++            unregisterReceiver(receiver)
++        } catch (_: Throwable) {
++        }
++        mmTelFeatures.values.forEach { it.initializedSipHandler?.close() }
++        mmTelFeatures.clear()
++        val alarmManager = getSystemService(AlarmManager::class.java)
++        PendingIntent.getBroadcast(this, 0, Intent(receiver.ALARM_PERIODIC_REGISTER),
++            PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE)?.let { alarmManager.cancel(it) }
+         instance = null
++        super.onDestroy()
+     }
+ 
+     override fun readyForFeatureCreation() {
+diff --git a/app/src/main/java/me/phh/ims/PhhMmTelFeature.kt b/app/src/main/java/me/phh/ims/PhhMmTelFeature.kt
+--- a/app/src/main/java/me/phh/ims/PhhMmTelFeature.kt
++++ b/app/src/main/java/me/phh/ims/PhhMmTelFeature.kt
 @@ -11,6 +11,7 @@
  import android.telephony.ims.feature.ImsFeature
  import android.telephony.ims.stub.ImsCallSessionImplBase
@@ -224,21 +168,23 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/ims/PhhMmTe
  import android.telephony.ims.stub.ImsRegistrationImplBase.REGISTRATION_TECH_LTE
  import android.telephony.ims.stub.ImsSmsImplBase
  import android.telephony.ims.stub.ImsUtImplBase
-@@ -31,6 +32,13 @@
+@@ -30,6 +31,15 @@
+ 
      val imsSms = PhhImsSms(slotId)
      lateinit var sipHandler: SipHandler
- 
++    val initializedSipHandler: SipHandler?
++        get() = if (this::sipHandler.isInitialized) sipHandler else null
++
 +    // Listener of the call session currently in progress, incoming or outgoing. Declared
 +    // here rather than inside onFeatureReady because createCallSession (outgoing) and the
 +    // onIncomingCall handler both need to publish into it.
 +    private var callListener: ImsCallSessionListener? = null
 +    // Profile the framework handed us for the outgoing call, needed to report it connected.
 +    private var outgoingCallProfile: ImsCallProfile? = null
-+
+ 
      override fun createCallProfile(callSessionType: Int, callType: Int): ImsCallProfile {
          Rlog.d(TAG, "$slotId createCallProfile $callSessionType $callType")
-         // check why not called
-@@ -61,6 +69,14 @@
+@@ -61,6 +71,14 @@
  
              override fun start(callee: String, profile: ImsCallProfile) {
                  Rlog.d(TAG, "Starting call with $callee profile $profile")
@@ -253,7 +199,7 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/ims/PhhMmTe
                  sipHandler.call(callee)
              }
  
-@@ -79,6 +95,9 @@
+@@ -79,6 +97,9 @@
  
              override fun terminate(reason: Int) {
                  Rlog.d(TAG, "Terminating call with reason $reason")
@@ -263,7 +209,7 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/ims/PhhMmTe
                  mListener.callSessionTerminated(ImsReasonInfo(ImsReasonInfo.CODE_USER_TERMINATED, 0, "Kikoo"))
              }
          }
-@@ -112,6 +131,17 @@
+@@ -112,22 +133,48 @@
  
      override fun onFeatureReady() {
          Rlog.d(TAG, "$slotId onFeatureReady")
@@ -281,8 +227,10 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/ims/PhhMmTe
          if(this::sipHandler.isInitialized) return
  
          // call onRegistering first then
-@@ -120,14 +150,29 @@
-         sipHandler = SipHandler(imsService)
+         // register SIP here and call onRegistered after .. register.
+         val imsService = PhhImsService.Companion.instance!!
+-        sipHandler = SipHandler(imsService)
++        sipHandler = SipHandler(imsService, slotId)
          sipHandler.imsFailureCallback = { imsService.getRegistration(slotId).onDeregistered(null) }
          sipHandler.imsReadyCallback = {
 -            imsService.getRegistration(slotId).onRegistered(REGISTRATION_TECH_LTE)
@@ -314,7 +262,7 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/ims/PhhMmTe
              val callProfile = ImsCallProfile(ImsCallProfile.SERVICE_TYPE_NORMAL, ImsCallProfile.CALL_TYPE_VOICE,
                  Bundle(),
                  ImsStreamMediaProfile(
-@@ -187,11 +232,21 @@
+@@ -187,11 +234,21 @@
                  override fun reject(reason: Int) {
                      sipHandler.rejectCall()
                      Rlog.d(TAG, "Rejecting call $reason")
@@ -336,7 +284,7 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/ims/PhhMmTe
                  }
  
              }, Bundle())
-@@ -213,7 +268,7 @@
+@@ -213,12 +270,14 @@
              }
          }
  
@@ -345,9 +293,16 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/ims/PhhMmTe
          sipHandler.getVolteNetwork()
      }
  
-diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/ims/PhhMmTelFeatureProtected.java b/app/src/main/java/me/phh/ims/PhhMmTelFeatureProtected.java
---- a/app/src/main/java/me/phh/ims/PhhMmTelFeatureProtected.java	2026-08-23 20:11:27.991849400 +0800
-+++ b/app/src/main/java/me/phh/ims/PhhMmTelFeatureProtected.java	2026-08-24 00:05:02.258142200 +0800
+     override fun onFeatureRemoved() {
+         Rlog.d(TAG, "$slotId onFeatureRemoved")
++        initializedSipHandler?.close()
++        PhhImsService.instance?.mmTelFeatures?.remove(slotId, this)
+     }
+ 
+     // ints are @MmTelCapabilities.MmTelCapability and @ImsRegistrationImplBase.ImsRegistrationTech
+diff --git a/app/src/main/java/me/phh/ims/PhhMmTelFeatureProtected.java b/app/src/main/java/me/phh/ims/PhhMmTelFeatureProtected.java
+--- a/app/src/main/java/me/phh/ims/PhhMmTelFeatureProtected.java
++++ b/app/src/main/java/me/phh/ims/PhhMmTelFeatureProtected.java
 @@ -1,4 +1,4 @@
 -
 +//SPDX-License-Identifier: GPL-2.0
@@ -432,9 +387,9 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/ims/PhhMmTe
 +		}
  	}
  }
-diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipConnection.kt b/app/src/main/java/me/phh/sip/SipConnection.kt
---- a/app/src/main/java/me/phh/sip/SipConnection.kt	2026-08-23 20:11:27.996612600 +0800
-+++ b/app/src/main/java/me/phh/sip/SipConnection.kt	2026-08-24 00:05:02.276056200 +0800
+diff --git a/app/src/main/java/me/phh/sip/SipConnection.kt b/app/src/main/java/me/phh/sip/SipConnection.kt
+--- a/app/src/main/java/me/phh/sip/SipConnection.kt
++++ b/app/src/main/java/me/phh/sip/SipConnection.kt
 @@ -13,6 +13,8 @@
  import java.net.Inet6Address
  import java.net.InetAddress
@@ -444,7 +399,17 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipConn
  import java.net.ServerSocket
  import java.net.Socket
  import java.net.StandardProtocolFamily
-@@ -100,6 +102,17 @@
+@@ -71,7 +73,8 @@
+ 
+     override fun connect(_remotePort: Int) {
+         remotePort = _remotePort
+-        socket.connect(InetSocketAddress(remoteAddr, remotePort))
++        socket.connect(InetSocketAddress(remoteAddr, remotePort), 10_000)
++        socket.soTimeout = 15_000
+         if (_localAddr == null) {
+             // localAddr/Port only valid after connect if no explicit bind
+             localAddr = socket.localAddress
+@@ -100,6 +103,17 @@
  
      override fun close() {
          socket.close()
@@ -462,15 +427,16 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipConn
      }
  
      override fun enableIpsec(
-@@ -133,17 +146,32 @@
+@@ -129,21 +143,50 @@
+ ) {
+     val serverSocket: ServerSocket
+     val serverSocketFd: FileDescriptor
++    private var acceptedFd: FileDescriptor? = null
++    private var closed = false
+     lateinit var inTransform: IpSecTransform
      lateinit var outTransform: IpSecTransform
  
      init {
--        serverSocket = ServerSocket()
--        serverSocket.bind(InetSocketAddress(localAddr, localPort))
--        serverSocketFd =
--            serverSocket.javaClass.getMethod("getFileDescriptor\$").invoke(serverSocket)
--                as FileDescriptor
 +        // Upstream reflected on the hidden ServerSocket.getFileDescriptor$ method,
 +        // which Android 17 removed (NoSuchMethodException), and the NIO channel's
 +        // private `fd` field is not reachable either (hidden-API blocklist).
@@ -485,24 +451,44 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipConn
 +        // Bind before handing the FD to the Network so the source address is fixed.
 +        Os.bind(serverSocketFd, localAddr, localPort)
 +        Os.listen(serverSocketFd, 5)
-         network.bindSocket(serverSocketFd)
++        network.bindSocket(serverSocketFd)
 +        // ServerSocket is kept only so accept()/close() keep their old shape; the FD
 +        // above is the one that is actually listening.
-+        serverSocket = ServerSocket()
-     }
- 
-     fun accept(): Pair<SipReader, OutputStream> {
+         serverSocket = ServerSocket()
+-        serverSocket.bind(InetSocketAddress(localAddr, localPort))
+-        serverSocketFd =
+-            serverSocket.javaClass.getMethod("getFileDescriptor\$").invoke(serverSocket)
+-                as FileDescriptor
+-        network.bindSocket(serverSocketFd)
+-    }
+-
+-    fun accept(): Pair<SipReader, OutputStream> {
 -        val client = serverSocket.accept()
 -        return Pair(client.getInputStream().sipReader(), client.getOutputStream())
-+        // Accept on the raw FD created in init (serverSocket is not the listener).
++    }
++
++    fun accept(block: (SipReader, OutputStream) -> Unit) {
 +        val clientFd = Os.accept(serverSocketFd, null)
-+        val input = java.io.FileInputStream(clientFd)
-+        val output = java.io.FileOutputStream(clientFd)
-+        return Pair(input.sipReader(), output)
++        synchronized(this) {
++            if (closed) {
++                Os.close(clientFd)
++                throw java.net.SocketException("SIP listener closed")
++            }
++            acceptedFd = clientFd
++        }
++        try {
++            java.io.FileInputStream(clientFd).use { input ->
++                java.io.FileOutputStream(clientFd).use { output ->
++                    block(input.sipReader(), output)
++                }
++            }
++        } finally {
++            synchronized(this) { if (acceptedFd === clientFd) acceptedFd = null }
++        }
      }
  
      fun enableIpsec(
-@@ -166,7 +194,16 @@
+@@ -166,7 +209,20 @@
      }
  
      fun getChannel(): SelectableChannel {
@@ -514,13 +500,26 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipConn
 +    // Needed once the handler started reconnecting: the real listener is the raw FD from
 +    // init, so closing the placeholder ServerSocket alone leaks a file descriptor per
 +    // reconnect. The IPsec transforms are closed by the caller, which owns their lifetime.
-+    fun close() {
++    @Synchronized fun close() {
++        if (closed) return
++        closed = true
++        acceptedFd?.let { try { Os.shutdown(it, OsConstants.SHUT_RDWR) } catch (_: Exception) { } }
++        try { Os.shutdown(serverSocketFd, OsConstants.SHUT_RDWR) } catch (_: Exception) { }
 +        try { Os.close(serverSocketFd) } catch(t: Throwable) { }
 +        try { serverSocket.close() } catch(t: Throwable) { }
      }
  }
  
-@@ -271,6 +308,17 @@
+@@ -204,7 +260,7 @@
+     override fun connect(_remotePort: Int) {
+         remotePort = _remotePort
+         // Note: DO NOT connect, because the answers might come back from a different IP than where we sent to
+-        //socket.connect(InetSocketAddress(remoteAddr, remotePort))
++        //socket.connect(InetSocketAddress(remoteAddr, remotePort), 10_000)
+         if (_localAddr == null) {
+             // localAddr/Port only valid after connect if no explicit bind
+             localAddr = socket.localAddress
+@@ -271,6 +327,17 @@
  
      override fun close() {
          socket.close()
@@ -538,9 +537,9 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipConn
      }
  
      override fun enableIpsec(
-diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipHandler.kt b/app/src/main/java/me/phh/sip/SipHandler.kt
---- a/app/src/main/java/me/phh/sip/SipHandler.kt	2026-08-23 20:11:27.997692200 +0800
-+++ b/app/src/main/java/me/phh/sip/SipHandler.kt	2026-08-24 00:05:02.278307900 +0800
+diff --git a/app/src/main/java/me/phh/sip/SipHandler.kt b/app/src/main/java/me/phh/sip/SipHandler.kt
+--- a/app/src/main/java/me/phh/sip/SipHandler.kt
++++ b/app/src/main/java/me/phh/sip/SipHandler.kt
 @@ -7,6 +7,7 @@
  import android.net.*
  import android.os.Handler
@@ -549,7 +548,15 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipHand
  import android.telephony.CellInfoGsm
  import android.telephony.CellInfoLte
  import android.telephony.CellInfoNr
-@@ -42,16 +43,24 @@
+@@ -35,38 +36,78 @@
+     val cseq: String,
+ )
+ 
+-class SipHandler(val ctxt: Context) {
++class SipHandler(val ctxt: Context, val slotId: Int = 0) {
+     companion object {
+         private const val TAG = "PHH SipHandler"
+     }
  
      val myHandler = Handler(HandlerThread("PhhMmTelFeature").apply { start() }.looper)
      val myExecutor = Executor { p0 -> myHandler.post(p0) }
@@ -583,11 +590,26 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipHand
 +    }
  
      private val subscriptionManager: SubscriptionManager
++    private val activeSubscription: android.telephony.SubscriptionInfo
      private val telephonyManager: TelephonyManager
-@@ -66,7 +75,35 @@
- 
-     @SuppressLint("MissingPermission")
-     private val activeSubscription = subscriptionManager.activeSubscriptionInfoList[0]
+     private val connectivityManager: ConnectivityManager
+     private val ipSecManager: IpSecManager
+     init {
+         subscriptionManager = ctxt.getSystemService(SubscriptionManager::class.java)
+-        telephonyManager = ctxt.getSystemService(TelephonyManager::class.java)
++        @SuppressLint("MissingPermission")
++        val sub = subscriptionManager.getActiveSubscriptionInfoForSimSlotIndex(slotId)
++            ?: subscriptionManager.activeSubscriptionInfoList.firstOrNull { it.simSlotIndex == slotId }
++            ?: throw IllegalStateException("No active subscription for slot $slotId")
++        activeSubscription = sub
++        val baseTm = ctxt.getSystemService(TelephonyManager::class.java)
++        telephonyManager = baseTm.createForSubscriptionId(sub.subscriptionId)
+         connectivityManager = ctxt.getSystemService(ConnectivityManager::class.java)
+         ipSecManager = ctxt.getSystemService(IpSecManager::class.java)
+     }
+-
+-    @SuppressLint("MissingPermission")
+-    private val activeSubscription = subscriptionManager.activeSubscriptionInfoList[0]
 -    private val imei = telephonyManager.getDeviceId(activeSubscription.simSlotIndex)
 +    private val imei = run {
 +        // MIUI blocks getDeviceId for third-party packages ("MIUILOG- Permission Denied
@@ -621,10 +643,11 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipHand
      private val subId = activeSubscription.subscriptionId
      private val mcc = telephonyManager.simOperator.substring(0 until 3)
      private var mnc =
-@@ -123,6 +160,58 @@
+@@ -123,7 +164,65 @@
      )
      lateinit var ipsecSettings: SipIpsecSettings
  
+-    lateinit private var network: Network
 +    // Upstream builds these two as locals and drops the references, which is fine as long
 +    // as the process never reconnects: an IpSecTransform's kernel state lives until it is
 +    // closed, and these sec-agree SAs carry no lifetime, so nothing ever expires them.
@@ -637,6 +660,9 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipHand
 +    // nothing has been set up yet, and safe to call twice: every step is guarded, since
 +    // a throw here would abort the reconnect and leave us with no registration at all.
 +    private fun releaseConnection() {
++        registeredExpirySeconds = 0
++        imsReady = false
++        cbLock.withLock { responseCallbacks = emptyMap() }
 +        // The two client sockets. plainSocket is normally closed as soon as the 401 has
 +        // been read, and the control socket by the reader coroutine that lost it, but
 +        // connect() can also abort between creating them and either of those points --
@@ -677,10 +703,14 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipHand
 +        // they are released by SipConnectionTcp/Udp.close() -- the socket.close() above.
 +    }
 +
-     lateinit private var network: Network
++    private var network: Network? = null
++    private var networkProperties: LinkProperties? = null
++    private var networkCallback: ConnectivityManager.NetworkCallback? = null
++    private var closed = false
  
      lateinit private var plainSocket: SipConnection
-@@ -136,9 +225,30 @@
+     lateinit private var socket: SipConnection
+@@ -136,9 +235,26 @@
      private var responseCallbacks: Map<String, ((SipResponse) -> Boolean)> = mapOf()
      private var imsReady = false
      var imsReadyCallback: (() -> Unit)? = null
@@ -689,13 +719,9 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipHand
 +    // 0 until we have registered once. PhhImsService uses it to time the refresh.
 +    @Volatile var registeredExpirySeconds: Int = 0
 +
-+    // Guards the reconnect path below. connect() itself is re-enterable (it allocates
-+    // fresh SPIs and sockets each time), but every call launches two reader coroutines,
-+    // so reconnecting without this would leave the old ones running and accumulate a
-+    // reader per reconnect.
-+    @Volatile private var reconnecting = false
++    // Only the current connection's reader may trigger a reconnect.
 +    @Volatile private var connectionGeneration = 0
-+    // Only ever touched inside the `reconnecting` guard, so plain fields are enough.
++    // Updated under connectLock.
 +    private var reconnectBackoffMs = 2000L
 +    private var lastReconnectAt = 0L
      var imsFailureCallback: (() -> Unit)? = null
@@ -711,65 +737,212 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipHand
      var onIncomingCall: ((handle: Object, from: String, extras: Map<String, String>) -> Unit)? =
          null
      var onCancelledCall: ((handle: Object, from: String, extras: Map<String, String>) -> Unit)? =
-@@ -218,12 +328,34 @@
+@@ -154,7 +270,7 @@
+         cbLock.withLock { responseCallbacks += (callId to cb) }
      }
  
-     var abandonnedBecauseOfNoPcscf = false
--    fun connect() {
+-    fun parseMessage(reader: SipReader, writer: OutputStream): Boolean {
++    fun parseMessage(reader: SipReader, writer: OutputStream, generation: Int): Boolean {
+         val msg =
+             try {
+                 reader.parseMessage()
+@@ -166,36 +282,39 @@
+                 }
+                 throw e
+             }
+-        Rlog.d(TAG, "RObject() message $msg")
+-        if (msg is SipResponse) {
+-            return handleResponse(msg)
+-        }
+-        if (msg !is SipRequest) {
+-            // invalid message, stop trying
+-            Rlog.d(TAG, "Got invalid message! Closing socket (except main)")
+-            return false
+-        }
+-
+-        val requestCb = cbLock.withLock { requestCallbacks[msg.method] }
+-        var status = 200
+-        // XXX default requestCb = notification?
+-        if (requestCb != null) {
+-            status = requestCb(msg)
+-        }
+-        if(status == 0) return true
+-        val reply =
+-            SipResponse(
+-                statusCode = status,
+-                statusString = if (status == 200) "OK" else if (status == 100) "Trying" else "ERROR",
+-                headersParam =
+-                    msg.headers.filter { (k, _) ->
+-                        k in listOf("cseq", "via", "from", "to", "call-id")
+-                    }
+-            )
+-        Rlog.d(TAG, "Replying back with $reply")
+-        synchronized(writer) { writer.write(reply.toByteArray()) }
+-
+-        return true
++        return connectLock.withLock {
++            if (closed || generation != connectionGeneration) return@withLock false
++            Rlog.d(TAG, "RObject() message $msg")
++            if (msg is SipResponse) {
++                return handleResponse(msg)
++            }
++            if (msg !is SipRequest) {
++                // invalid message, stop trying
++                Rlog.d(TAG, "Got invalid message! Closing socket (except main)")
++                return false
++            }
 +
-+    // connect() is reached from three threads: the reconnect coroutine, the IMS network
-+    // callback, and the delayed thread{} in onLinkPropertiesChanged. Each call reassigns
-+    // the socket/ipsecSettings fields and now releases the previous set at entry, so two
-+    // running concurrently could have one tear down what the other just built. Nothing
-+    // called from inside connect() takes this lock, so serialising it cannot deadlock.
++            val requestCb = cbLock.withLock { requestCallbacks[msg.method] }
++            var status = 200
++            // XXX default requestCb = notification?
++            if (requestCb != null) {
++                status = requestCb(msg)
++            }
++            if(status == 0) return true
++            val reply =
++                SipResponse(
++                    statusCode = status,
++                    statusString = if (status == 200) "OK" else if (status == 100) "Trying" else "ERROR",
++                    headersParam =
++                        msg.headers.filter { (k, _) ->
++                            k in listOf("cseq", "via", "from", "to", "call-id")
++                        }
++                )
++            Rlog.d(TAG, "Replying back with $reply")
++            synchronized(writer) { writer.write(reply.toByteArray()) }
++
++            true
++        }
+     }
+ 
+     fun handleResponse(response: SipResponse): Boolean {
+@@ -217,34 +336,64 @@
+         return true
+     }
+ 
+-    var abandonnedBecauseOfNoPcscf = false
+-    fun connect() {
+-        abandonnedBecauseOfNoPcscf = false
+-        Rlog.d(TAG, "Trying to connect to SIP server")
+-        val lp = connectivityManager.getLinkProperties(network)
+-        Rlog.d(TAG, "Got link properties $lp")
+-        val pcscfs = (lp!!.javaClass.getMethod("getPcscfServers").invoke(lp) as List<*>).sortedBy { if(it is Inet6Address) 0 else 1 }
+-        val pcscf = if (pcscfs.isNotEmpty()) {
+-            pcscfs[0] as InetAddress
++    // Network events, reconnects, and alarm refreshes share connection ownership.
 +    private val connectLock = ReentrantLock()
 +
-+    fun connect() = connectLock.withLock { connectLocked() }
-+
-+    private fun connectLocked() {
-         abandonnedBecauseOfNoPcscf = false
-         Rlog.d(TAG, "Trying to connect to SIP server")
-+        // Release whatever a previous attempt left behind. The reconnect path already
-+        // does this before calling us, but the network callbacks below also call connect()
-+        // directly, and every call overwrites the socket and ipsecSettings fields -- so
-+        // anything still held would become unreachable. Idempotent, and safe on the very
-+        // first call because every step is guarded by isInitialized.
-+        releaseConnection()
-         val lp = connectivityManager.getLinkProperties(network)
-         Rlog.d(TAG, "Got link properties $lp")
--        val pcscfs = (lp!!.javaClass.getMethod("getPcscfServers").invoke(lp) as List<*>).sortedBy { if(it is Inet6Address) 0 else 1 }
-+        if (lp == null) {
-+            // The IMS network can go away between the callback and this call (the
-+            // ePDG tunnel dropping does exactly that), and lp!! crashed the service.
-+            Rlog.w(TAG, "No link properties, IMS network went away; aborting connect")
-+            return
++    fun connect(expectedNetwork: Network? = null): Unit = connectLock.withLock {
++        if (closed) return@withLock
++        val currentNetwork = network ?: return@withLock
++        if (expectedNetwork != null && expectedNetwork != currentNetwork) return@withLock
++        val lp = networkProperties ?: return@withLock
++        val pcscfs = (lp.javaClass.getMethod("getPcscfServers").invoke(lp) as List<*>)
++            .filterIsInstance<InetAddress>().sortedBy { if (it is Inet6Address) 0 else 1 }
++        if (pcscfs.isEmpty()) {
++            Rlog.w(TAG, "Waiting for IMS network P-CSCF addresses")
++            return@withLock
 +        }
-+        val pcscfs = (lp.javaClass.getMethod("getPcscfServers").invoke(lp) as List<*>).sortedBy { if(it is Inet6Address) 0 else 1 }
-         val pcscf = if (pcscfs.isNotEmpty()) {
-             pcscfs[0] as InetAddress
++        ++connectionGeneration
++        releaseConnection()
++        for (pcscf in pcscfs) {
++            val source = lp.linkAddresses.map { it.address }.firstOrNull {
++                (it is Inet6Address) == (pcscf is Inet6Address)
++            } ?: continue
++            try {
++                if (connectLocked(currentNetwork, source, pcscf)) return@withLock
++            } catch (e: IOException) {
++                Rlog.w(TAG, "SIP connection failed for $pcscf: $e")
++                releaseConnection()
++            }
++        }
++        imsFailureCallback?.invoke()
++    }
++
++    fun refreshRegistration(): Unit = connectLock.withLock {
++        if (registeredExpirySeconds == 0) {
++            connect()
          } else {
-@@ -281,6 +413,10 @@
+-            Rlog.w(TAG, "Had no Pcscf Sever defined, aborting")
+-            val t = try { InetAddress.getByName("ims.mnc${mnc}.mcc${mcc}.pub.3gppnetwork.org") } catch(t: Throwable) { null }
+-            val t2 = try { InetAddress.getByName("ims.mnc${mnc}.mcc${mcc}.3gppnetwork.org") } catch(t: Throwable) { null }
+-            Rlog.d(TAG, "Resolved $t and $t2")
+-            //imsFailureCallback?.invoke()
+-            //abandonnedBecauseOfNoPcscf = true
+-            //return
+-            // For annoying broken Vince's RIL that can't report Pcscf
+-            InetAddress.getByName("2001:4c48:400:100::2") //,/2001:4c48:400::3:2
+-        }
+-
+-        localAddr = lp.linkAddresses.map { it.address }.sortedBy { if(it is Inet6Address) 0 else 1 }.first()
++            try {
++                register()
++            } catch (e: IOException) {
++                Rlog.w(TAG, "Registration refresh failed: $e")
++                connect()
++            }
++        }
++    }
++
++    private fun connectLocked(network: Network, source: InetAddress, pcscf: InetAddress): Boolean {
++        localAddr = source
+         pcscfAddr = pcscf
+-
++        commonHeaders = commonHeaders - "security-verify"
++        registerHeaders = registerHeaders - "security-verify"
++        akaDigest = """Digest username="$user",realm="$realm",nonce="",uri="sip:$realm",response="",algorithm=AKAv1-MD5"""
+         Rlog.w(TAG, "Connecting with address $localAddr to $pcscfAddr")
+ 
+         val clientSpiC = ipSecManager.allocateSecurityParameterIndex(localAddr)
+-        val clientSpiS = ipSecManager.allocateSecurityParameterIndex(localAddr, clientSpiC.spi + 1)
++        val clientSpiS = try {
++            ipSecManager.allocateSecurityParameterIndex(localAddr, clientSpiC.spi + 1)
++        } catch (e: Exception) {
++            clientSpiC.close()
++            throw e
++        }
+         ipsecSettings = SipIpsecSettings(
+             clientSpiS = clientSpiS,
+             clientSpiC = clientSpiC)
+@@ -281,8 +430,11 @@
          plainSocket.close()
          if (plainRegReply !is SipResponse || plainRegReply.statusCode != 401) {
              Rlog.w(TAG, "Didn't get expected response from initial register, aborting")
+-            imsFailureCallback?.invoke()
+-            return
 +            // Give back the two SPIs and three sockets allocated above. Upstream returns
 +            // straight out and relies on the process being restarted; once the reconnect
 +            // path can call connect() repeatedly, each failed attempt would strand them.
 +            releaseConnection()
-             imsFailureCallback?.invoke()
-             return
++            return false
          }
-@@ -363,11 +499,15 @@
+ 
+         val (wwwAuthenticateType, wwwAuthenticateParams) =
+@@ -339,7 +491,12 @@
+             val serverSpiS = ipSecManager.allocateSecurityParameterIndex(pcscfAddr, spiS)
+ 
+             val spiC = securityServerParams["spi-c"]!!.toUInt().toInt()
+-            val serverSpiC = ipSecManager.allocateSecurityParameterIndex(pcscfAddr, spiC)
++            val serverSpiC = try {
++                ipSecManager.allocateSecurityParameterIndex(pcscfAddr, spiC)
++            } catch (e: Exception) {
++                serverSpiS.close()
++                throw e
++            }
+ 
+             ipsecSettings = SipIpsecSettings(
+                 clientSpiS = clientSpiS,
+@@ -363,11 +520,15 @@
                          }
                      }
  
 -            val serverInTransform = ipSecBuilder.buildTransportModeTransform(pcscfAddr, clientSpiS)
 -            val serverOutTransform = ipSecBuilder.buildTransportModeTransform(localAddr, serverSpiC)
 +            val inT = ipSecBuilder.buildTransportModeTransform(pcscfAddr, clientSpiS)
-+            val outT = ipSecBuilder.buildTransportModeTransform(localAddr, serverSpiC)
 +            // Also keep references so releaseIpsec() can close them on reconnect;
 +            // upstream dropped them, which leaked four transport SAs per reconnect.
 +            serverInTransform = inT
++            val outT = ipSecBuilder.buildTransportModeTransform(localAddr, serverSpiC)
 +            serverOutTransform = outT
              socket.enableIpsec(ipSecBuilder, ipSecManager, clientSpiC, serverSpiS)
 -            serverSocket.enableIpsec(ipSecManager, serverInTransform, serverOutTransform)
@@ -779,28 +952,58 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipHand
          }
          socket.connect(portS)
          updateCommonHeaders(socket)
-@@ -381,6 +521,10 @@
+@@ -376,14 +537,18 @@
+             if (socket is SipConnectionTcp) socket.gReader()
+             else if (socket is SipConnectionUdp) serverSocketUdp.gReader()
+             else socket.gReader()
+-        ).parseMessage()!!
++        ).parseMessage() ?: throw EOFException("P-CSCF closed during registration")
+         Rlog.d(TAG, "Received $regReply")
  
          if (regReply !is SipResponse || regReply.statusCode != 200) {
              Rlog.w(TAG, "Could not connect, aborting SIP")
+-            imsFailureCallback?.invoke()
+-            return
+-        }
 +            // Same as the 401 path above, plus the four sec-agree SPIs and both transform
 +            // pairs built for this attempt. These carry no lifetime, so nothing in the
 +            // kernel would ever expire them on its own.
 +            releaseConnection()
-             imsFailureCallback?.invoke()
-             return
-         }
-@@ -399,32 +543,84 @@
++            return false
++        }
++        (socket as? SipConnectionTcp)?.socket?.soTimeout = 0
+ 
+         setResponseCallback(registerHeaders["call-id"]!![0], ::registerCallback)
+         setRequestCallback(SipMethod.MESSAGE, ::handleSms)
+@@ -399,32 +564,60 @@
          // - connection to server socket
          // start both in threads as we're only called here from network
          // callback from which it's better to return
-+        val myGeneration = ++connectionGeneration
-         CoroutineScope(Dispatchers.IO).launch {
+-        CoroutineScope(Dispatchers.IO).launch {
 -            // XXX catch and reconnect on 'java.net.SocketException: Software caused connection
 -            // abort' ?
-             try {
+-            try {
 -                while (true) {
 -                    parseMessage(socket.gReader(), socket.gWriter())
+-                }
+-            } catch(t: Throwable) {
+-                Rlog.d(TAG, "Got exception in main/control socket", t)
+-            }
+-            socket.close()
+-        }
++        val myGeneration = ++connectionGeneration
++        val mySocket = socket
+         CoroutineScope(Dispatchers.IO).launch {
+             try {
+-                while (true) {
+-                    // XXX catch and reconnect on 'java.net.SocketException: Socket closed' ?
+-                    val client = serverSocket.serverSocket.accept()
+-                    // there can only be a single client at a time because
+-                    // both source and destination ports are fixed
+-                    val reader = client.getInputStream().sipReader()
+-                    val writer = client.getOutputStream()
+-                    while (parseMessage(reader, writer)) { }
+-                    client.close()
 -                }
 +                // Honour parseMessage's return value. It returns false to mean "this
 +                // socket is finished" -- the other two call sites already loop on it.
@@ -808,88 +1011,55 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipHand
 +                // the connection: the reader hit EOF, returned false, and the loop
 +                // immediately read EOF again, forever. The registration went dead while
 +                // the process stayed alive, and it recurred every 30-60 minutes.
-+                while (parseMessage(socket.gReader(), socket.gWriter())) { }
++                while (myGeneration == connectionGeneration && parseMessage(mySocket.gReader(), mySocket.gWriter(), myGeneration)) { }
 +                Rlog.d(TAG, "Main/control socket closed by peer (gen $myGeneration)")
-+            } catch(t: Throwable) {
+             } catch(t: Throwable) {
+-                Rlog.d(TAG, "Got exception in TCP server socket", t)
 +                Rlog.d(TAG, "Got exception in main/control socket: ${t}")
 +            }
-+            // Only the newest connection's reader may rebuild, and only once. Check this
-+            // before releasing anything: a stale reader must not tear down the resources
-+            // the current connection is using.
-+            if (myGeneration != connectionGeneration || reconnecting) {
-+                Rlog.d(TAG, "Not reconnecting: stale reader (gen $myGeneration)")
-+                try { socket.close() } catch(t: Throwable) { }
-+                return@launch
-+            }
-+            reconnecting = true
-+            try {
-+                // Release the previous connection's IPsec resources before building new
-+                // ones. Upstream never frees these because it never reconnects, so the
-+                // first reconnect made the leak visible: the sec-agree transport SAs went
-+                // from 4 to 8 (they carry no lifetime, so the kernel never expires them)
-+                // and xfrm policies grew with them. Left alone this accumulates four SAs
-+                // per reconnect for the life of the process.
-+                // Closes the control socket too, so no separate socket.close() here.
++            val retryGeneration = connectLock.withLock {
++                if (myGeneration != connectionGeneration) {
++                    Rlog.d(TAG, "Not reconnecting: stale reader (gen $myGeneration)")
++                    return@launch
++                }
++                ++connectionGeneration
 +                releaseConnection()
-+                // Rebuild the whole connection rather than just re-registering: the
-+                // sec-agree IPsec transforms and the listening socket are all bound to
-+                // the connection we just lost.
-+                //
-+                // Back off when the peer drops us repeatedly. Vodafone UK recycles the
-+                // connection about hourly, which resets this to the 2s floor; a P-CSCF
-+                // that rejects us immediately would otherwise have us rebuild the whole
-+                // IPsec setup every 2s indefinitely.
 +                val sinceLast = SystemClock.elapsedRealtime() - lastReconnectAt
-+                reconnectBackoffMs =
-+                    if (sinceLast > 600_000L) 2000L
++                reconnectBackoffMs = if (sinceLast > 600_000L) 2000L
 +                    else (reconnectBackoffMs * 2).coerceAtMost(120_000L)
 +                lastReconnectAt = SystemClock.elapsedRealtime()
-+                Rlog.d(TAG, "Reconnecting in ${reconnectBackoffMs}ms (gen $myGeneration)")
-+                Thread.sleep(reconnectBackoffMs)
-+                connect()
-+                Rlog.d(TAG, "Reconnected after peer closed the control socket")
-             } catch(t: Throwable) {
--                Rlog.d(TAG, "Got exception in main/control socket", t)
-+                // Leave recovery to the periodic register alarm rather than retrying
-+                // here, so a persistently failing network cannot spin this path.
-+                Rlog.e(TAG, "Reconnect failed, waiting for periodic alarm: ${t}")
-+            } finally {
-+                reconnecting = false
-             }
--            socket.close()
-         }
++                connectionGeneration
++            }
++            Rlog.d(TAG, "Reconnecting in ${reconnectBackoffMs}ms (gen $retryGeneration)")
++            Thread.sleep(reconnectBackoffMs)
++            connectLock.withLock {
++                if (retryGeneration == connectionGeneration) connect(network)
++            }
++        }
 +        // Capture the socket objects instead of reading the fields on each iteration:
 +        // connect() reassigns those fields on reconnect, so a loop that outlived its
 +        // connection would start serving the NEW listener and race the fresh reader for
 +        // the P-CSCF's messages. The generation check stops such a loop at its next turn.
 +        val myServerSocket = serverSocket
 +        val myServerSocketUdp = serverSocketUdp
-         CoroutineScope(Dispatchers.IO).launch {
-             try {
--                while (true) {
--                    // XXX catch and reconnect on 'java.net.SocketException: Socket closed' ?
--                    val client = serverSocket.serverSocket.accept()
++        CoroutineScope(Dispatchers.IO).launch {
++            try {
 +                while (myGeneration == connectionGeneration) {
 +                    // Accept on the raw listening FD. The `serverSocket` field is an
 +                    // unbound placeholder kept only for close(); accepting on it threw
 +                    // "Socket is not bound yet", so the P-CSCF's SUBSCRIBE response and
 +                    // NOTIFY never arrived and imsReadyCallback never fired.
-+                    val (reader, writer) = myServerSocket.accept()
-                     // there can only be a single client at a time because
-                     // both source and destination ports are fixed
--                    val reader = client.getInputStream().sipReader()
--                    val writer = client.getOutputStream()
-                     while (parseMessage(reader, writer)) { }
--                    client.close()
-                 }
++                    myServerSocket.accept { reader, writer ->
++                        while (parseMessage(reader, writer, myGeneration)) { }
++                    }
++                }
 +                Rlog.d(TAG, "TCP server loop done (gen $myGeneration)")
-             } catch(t: Throwable) {
--                Rlog.d(TAG, "Got exception in TCP server socket", t)
++            } catch(t: Throwable) {
 +                Rlog.d(TAG, "Got exception in TCP server socket: ${t}")
              }
          }
          CoroutineScope(Dispatchers.IO).launch {
-@@ -432,20 +628,21 @@
+@@ -432,84 +625,93 @@
                  val bufferIn = ByteArray(128 * 1024)
                  val dgramPacketIn = DatagramPacket(bufferIn, bufferIn.size)
                  val writer = ByteArrayOutputStream()
@@ -901,7 +1071,8 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipHand
                      Rlog.d(TAG, "Received dgram packet")
                      val baIs = ByteArrayInputStream(dgramPacketIn.data, dgramPacketIn.offset, dgramPacketIn.length)
                      val reader = baIs.sipReader()
-                     while (parseMessage(reader, writer)) { }
+-                    while (parseMessage(reader, writer)) { }
++                    while (parseMessage(reader, writer, myGeneration)) { }
                      val writerOut = writer.toByteArray()
                      val dgramPacketOut = DatagramPacket(writerOut, writerOut.size, dgramPacketIn.address, dgramPacketIn.port)
 -                    serverSocketUdp.socket.send(dgramPacketOut)
@@ -911,11 +1082,162 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipHand
 +                Rlog.d(TAG, "UDP server loop done (gen $myGeneration)")
              } catch(t: Throwable) {
 -                Rlog.d(TAG, "Got exception in UDP server socket", t)
+-            }
+-        }
+-    }
+-
+-    fun getVolteNetwork() {
+-        // TODO add something similar for VoWifi ipsec tunnel?
+-        Rlog.d(TAG, "Requesting IMS network")
 +                Rlog.d(TAG, "Got exception in UDP server socket: ${t}")
-             }
-         }
++            }
++        }
++        return true
++    }
++
++    fun getVolteNetwork() = connectLock.withLock {
++        if (closed || networkCallback != null) return@withLock
++        val callback = object : ConnectivityManager.NetworkCallback() {
++            override fun onAvailable(available: Network) {
++                myHandler.post {
++                    connectLock.withLock {
++                        if (!closed && network != available) {
++                            ++connectionGeneration
++                            releaseConnection()
++                            network = available
++                            networkProperties = null
++                            Rlog.d(TAG, "Got IMS network: $available")
++                        }
++                    }
++                }
++            }
++
++            override fun onLinkPropertiesChanged(available: Network, properties: LinkProperties) {
++                myHandler.post {
++                    connectLock.withLock {
++                        if (closed || network != available) return@withLock
++                        val previous = networkProperties
++                        networkProperties = properties
++                        if (previous == null || previous.linkAddresses != properties.linkAddresses ||
++                            previous.javaClass.getMethod("getPcscfServers").invoke(previous) !=
++                            properties.javaClass.getMethod("getPcscfServers").invoke(properties)) {
++                            connect(available)
++                        }
++                    }
++                }
++            }
++
++            override fun onLost(lost: Network) {
++                myHandler.post {
++                    connectLock.withLock {
++                        if (!closed && network == lost) {
++                            network = null
++                            networkProperties = null
++                            ++connectionGeneration
++                            releaseConnection()
++                            imsFailureCallback?.invoke()
++                            Rlog.d(TAG, "IMS network lost: $lost")
++                        }
++                    }
++                }
++            }
++        }
++        Rlog.d(TAG, "Requesting IMS network for subId=$subId (slotId=$slotId)")
+         connectivityManager.requestNetwork(NetworkRequest.Builder()
+-            //.addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
+-            //.addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+-            //.setNetworkSpecifier(subId.toString())
++            .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
++            .setNetworkSpecifier(TelephonyNetworkSpecifier.Builder().setSubscriptionId(subId).build())
+             .addCapability(NetworkCapabilities.NET_CAPABILITY_IMS)
+-            //.addCapability(NetworkCapabilities.NET_CAPABILITY_MMTEL)
+-            .build(),
+-            object : ConnectivityManager.NetworkCallback() {
+-                override fun onUnavailable() {
+-                    Rlog.d(TAG, "IMS network unavailable")
+-                }
+-
+-                override fun onLost(network: Network) {
+-                    Rlog.d(TAG, "IMS network lost")
+-                }
+-
+-                override fun onBlockedStatusChanged(network: Network, blocked: Boolean) {
+-                    Rlog.d(TAG, "IMS network blocked status changed $blocked")
+-                }
+-
+-                override fun onCapabilitiesChanged(
+-                    network: Network,
+-                    networkCapabilities: NetworkCapabilities
+-                ) {
+-                    Rlog.d(TAG, "IMS network capabilities changed $networkCapabilities")
+-                }
+-
+-                override fun onLosing(network: Network, maxMsToLive: Int) {
+-                    Rlog.d(TAG, "IMS network losing")
+-                }
+-
+-                override fun onLinkPropertiesChanged(
+-                    _network: Network,
+-                    linkProperties: LinkProperties
+-                ) {
+-                    Rlog.d(TAG, "IMS network link properties changed $linkProperties")
+-                    val pcscfs = linkProperties!!.javaClass.getMethod("getPcscfServers").invoke(linkProperties) as List<*>
+-                    Rlog.d(TAG, "Got pcscfs $pcscfs")
+-                    if(pcscfs.isNotEmpty() && abandonnedBecauseOfNoPcscf) {
+-                        connect()
+-                    }
+-                }
+-
+-                override fun onAvailable(_network: Network) {
+-                    Rlog.d(TAG, "Got IMS network.")
+-                    if (!this@SipHandler::network.isInitialized) {
+-                        network = _network
+-                        thread {
+-                            Thread.sleep(4000)
+-                            connect()
+-                        }
+-                    } else {
+-                        Rlog.d(TAG, "... don't try anything")
+-                    }
+-                }
+-            }
+-        )
++            .build(), callback)
++        networkCallback = callback
++    }
++
++    fun close() = connectLock.withLock {
++        if (closed) return@withLock
++        closed = true
++        networkCallback?.let { connectivityManager.unregisterNetworkCallback(it) }
++        networkCallback = null
++        network = null
++        networkProperties = null
++        ++connectionGeneration
++        releaseConnection()
++        myHandler.removeCallbacksAndMessages(null)
++        myHandler.looper.quitSafely()
      }
-@@ -609,6 +806,15 @@
+ 
+     fun updateCommonHeaders(socket: SipConnection) {
+@@ -539,9 +741,13 @@
+ 
+     @SuppressLint("MissingPermission")
+     fun register(_writer: OutputStream? = null) {
+-        val tm = ctxt.getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
+-
+-        val cellInfoList = tm.getAllCellInfo()
++        val tm = telephonyManager
++
++        val cellInfoList = try {
++            tm.getAllCellInfo() ?: emptyList()
++        } catch (_: SecurityException) {
++            emptyList()
++        }
+         for(cell in cellInfoList) {
+             if(cell is CellInfoLte) {
+                 val cellIdentity = cell.cellIdentity
+@@ -609,6 +815,15 @@
          // on failure just abort thread, ims will restart
          require(response.statusCode == 200)
  
@@ -931,10 +1253,12 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipHand
          val r =  Regex("lr;[^>]*")
          val route =
              (response.headers.getOrDefault("service-route", emptyList()) +
-@@ -639,6 +845,27 @@
+@@ -637,6 +852,27 @@
+         subscribe()
+         // always keep callback
          return false
-     }
- 
++    }
++
 +    /* Expiry the registrar granted, per RFC 3261: the "expires" parameter on the Contact
 +     * that matches ours wins, otherwise the Expires header. Returns 0 when neither is
 +     * present so the caller can fall back to a conservative default.
@@ -954,12 +1278,10 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipHand
 +        }
 +        if (best > 0) return best
 +        return response.headers["expires"]?.firstOrNull()?.trim()?.toIntOrNull() ?: 0
-+    }
-+
+     }
+ 
      fun subscribe() {
-         val local =
-             if(socket.gLocalAddr() is Inet6Address)
-@@ -703,7 +930,14 @@
+@@ -703,7 +939,14 @@
      }
  
      fun handleUpdate(request: SipRequest): Int {
@@ -975,7 +1297,7 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipHand
          val ipType = if(call.rtpRemoteAddr is Inet6Address) "IP6" else "IP4"
          val allTracks = listOf(call.amrTrack, call.dtmfTrack).sorted()
          val mySdp = """
-@@ -780,10 +1014,11 @@
+@@ -780,10 +1023,11 @@
      }
  
      fun handleCancel(request: SipRequest): Int {
@@ -989,7 +1311,7 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipHand
  
          // We're supposed to add an additional answer SIP/2.0 487 Request Terminated
          onCancelledCall?.invoke(Object(), "", emptyMap())
-@@ -811,6 +1046,10 @@
+@@ -811,6 +1055,10 @@
          val call = currentCall!!
          thread {
              var sequenceNumber = 0
@@ -1000,7 +1322,7 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipHand
  
              val encoder = MediaCodec.createEncoderByType("audio/3gpp")
              val mediaFormat = MediaFormat.createAudioFormat("audio/3gpp", 8000, 1)
-@@ -818,7 +1057,16 @@
+@@ -818,7 +1066,16 @@
              encoder.configure(mediaFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
              encoder.start()
  
@@ -1018,7 +1340,7 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipHand
                  val timestamp = sequenceNumber * 160
                  Thread.sleep(20)
                  val rtpHeader = listOf(
-@@ -839,12 +1087,19 @@
+@@ -839,12 +1096,19 @@
                  sequenceNumber++
              }
  
@@ -1039,7 +1361,7 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipHand
  
              audioRecord.startRecording()
  
-@@ -920,10 +1175,20 @@
+@@ -920,10 +1184,20 @@
                      }
                  }
              }
@@ -1064,7 +1386,7 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipHand
          }
      }
  
-@@ -942,7 +1207,14 @@
+@@ -942,7 +1216,14 @@
                  """<sip:$imsi@$local;transport=$transport>;expires=600000;+sip.instance="$sipInstance";+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel";+g.3gpp.smsip;+g.3gpp.mid-call;+g.3gpp.srvcc-alerting;+g.3gpp.ps2cs-srvcc-orig-pre-alerting"""
  
              Rlog.d(TAG, "Accepting call")
@@ -1080,7 +1402,7 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipHand
              val myHeaders = call.callHeaders
              val myHeaders3 = myHeaders - "rseq" - "security-verify" + """
                  Session-Expires: 900;refresher=uas
-@@ -990,7 +1262,12 @@
+@@ -990,7 +1271,12 @@
  
      fun rejectCall() {
          thread {
@@ -1094,7 +1416,7 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipHand
              val headers = call.callHeaders
              val mySeqCounter = reliableSequenceCounter++
              val myHeaders = headers + "RSeq: $mySeqCounter".toSipHeadersMap()
-@@ -1003,15 +1280,36 @@
+@@ -1003,15 +1289,36 @@
              Rlog.d(TAG, "Sending $msg")
              synchronized(socket.gWriter()) { socket.gWriter().write(msg.toByteArray()) }
  
@@ -1106,8 +1428,8 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipHand
 +            stopCallMedia()
              onCancelledCall?.invoke(Object(), "", emptyMap())
          }
-     }
- 
++    }
++
 +    // Tears down whatever the media path allocated for the current call. Safe to call
 +    // when no call is up, and safe to call twice.
 +    //
@@ -1124,8 +1446,8 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipHand
 +        }
 +        try { call?.rtpSocket?.close() } catch(t: Throwable) { }
 +        currentCall = null
-+    }
-+
+     }
+ 
      fun terminateCall() {
          // IDK what packet do we send, but at least we're close rtp
 -        currentCall?.imsMediaSession?.let { imsMediaManager.closeSession(it) }
@@ -1134,7 +1456,7 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipHand
  
          onCancelledCall?.invoke(Object(), "", emptyMap())
      }
-@@ -1042,6 +1340,14 @@
+@@ -1042,11 +1349,19 @@
  
      var respInFlight: SipResponse? = null
      fun call(phoneNumber: String) {
@@ -1149,14 +1471,20 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipHand
          thread {
  
              val rtpSocket = DatagramSocket(0, localAddr)
-@@ -1083,7 +1389,24 @@
+             val fakeRtcpSocket = DatagramSocket(0, localAddr) //useless but annoying ImsMediaManager
+-            network.bindSocket(rtpSocket)
++            checkNotNull(network).bindSocket(rtpSocket)
+             //rtpSocket.connect(rtpRemoteAddr, rtpRemotePort.toInt())
+ 
+             val amrTrack = 97
+@@ -1083,7 +1398,24 @@
  a=sendrecv
                         """.trim().toByteArray()
  
 -            val to = "tel:$phoneNumber;phone-context=ims.mnc$mnc.mcc$mcc.3gppnetwork.org"
 +            // Restore the leading + on international numbers. The framework hands us the
-+            // dialled string with the + already stripped ("44xxxxxxxxxx"), and upstream
-+            // passed it straight through, so we sent "tel:44xxxxxxxxxx" -- which RFC 3966
++            // dialled string with the + already stripped ("447351119385"), and upstream
++            // passed it straight through, so we sent "tel:447351119385" -- which RFC 3966
 +            // reads as a LOCAL number, not +44... . Vodafone answered 404 Not Found about
 +            // 2s after 100 Trying. Short codes like 191 have no country code and must NOT
 +            // get a +, hence the length test rather than a blanket prefix.
@@ -1175,7 +1503,7 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipHand
              val sipInstance = "<urn:gsma:imei:${imei.substring(0, 8)}-${imei.substring(8, 14)}-0>"
              val local =
                  if(socket.gLocalAddr() is Inet6Address)
-@@ -1158,9 +1481,20 @@
+@@ -1158,9 +1490,20 @@
                      synchronized(socket.gWriter()) { socket.gWriter().write(msg2.toByteArray()) }
                      callStarted.set(true)
                      Rlog.d(TAG, "Invite got SUCCESS")
@@ -1196,7 +1524,7 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipHand
                          onCancelledCall?.invoke(Object(), "",
                              mapOf(
                                  "statusCode" to resp.statusCode.toString(),
-@@ -1215,33 +1549,77 @@
+@@ -1215,33 +1558,77 @@
  
                  if(isPrecondition && resp.statusCode == 183) {
                      Rlog.d(TAG, "Handling precondition...")
@@ -1206,10 +1534,10 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipHand
 +                    // like from here.
                      val currLocal = respSdp.first { it.startsWith("a=curr:qos local")}
 -                    // No resource has been allocated at either side
--                    val localNone = currLocal.contains("none")
++                    val currRemote = respSdp.first { it.startsWith("a=curr:qos remote")}
+                     val localNone = currLocal.contains("none")
 -                    Rlog.d(TAG, "precondition: Curr is $currLocal $localNone")
-                     val currRemote = respSdp.first { it.startsWith("a=curr:qos remote")}
-+                    val localNone = currLocal.contains("none")
+-                    val currRemote = respSdp.first { it.startsWith("a=curr:qos remote")}
                      val remoteNone = currRemote.contains("none")
 -
 -                    if (localNone) {
@@ -1289,7 +1617,7 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipHand
                                  newSdp
                              )
                          Rlog.d(TAG, "Sending $msg2")
-@@ -1317,18 +1695,33 @@
+@@ -1317,18 +1704,33 @@
              decoder.configure(mediaFormat, null, null, 0)
              decoder.start()
  
@@ -1326,7 +1654,7 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipHand
  
                  if(ft.toInt() != 7) continue
  
-@@ -1369,10 +1762,19 @@
+@@ -1369,10 +1771,19 @@
                      decoder.releaseOutputBuffer(outBufIndex, false)
                  }
              }
@@ -1350,14 +1678,14 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipHand
          }
      }
  
-@@ -1472,8 +1874,14 @@
+@@ -1472,14 +1883,20 @@
          val (dtmfTrack, dtmfTrackDesc) = lookTrackMatching("telephone-event/8000")!!
  
          val allTracks = listOf(amrTrack, dtmfTrack).sorted()
 -        // destination is sip:<owner>@realm, extract owner
 -        val owner = request.destination.substringAfter("sip:").substringBefore("@")
 +        // Note: upstream put an `owner` (the IMSI from the request URI) in the SDP o= line
-+        // here. That produced "o=<15-digit IMSI> 1 2 IN IP4 ..." -- five fields where
++        // here. That produced "o=001010123456789 1 2 IN IP4 ..." -- five fields where
 +        // RFC 4566 requires six (username, sess-id, sess-version, nettype, addrtype,
 +        // address). Vodafone answered the INVITE with
 +        // CANCEL Reason: SIP;cause=200;text="Invalid SDP" about 2s after our 183, so every
@@ -1367,7 +1695,14 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipHand
  
          thread {
              // Need to sleep a bit so that our 100 Trying is sent first. Kinda weird.
-@@ -1494,7 +1902,7 @@
+             Thread.sleep(500)
+             val rtpSocket = DatagramSocket(0, localAddr)
+-            network.bindSocket(rtpSocket)
++            checkNotNull(network).bindSocket(rtpSocket)
+             rtpSocket.connect(rtpRemoteAddr, rtpRemotePort.toInt())
+ 
+             val local =
+@@ -1494,7 +1911,7 @@
              val ipType = if(socket.gLocalAddr() is Inet6Address) "IP6" else "IP4"
              val mySdp = ("""
  v=0
@@ -1376,7 +1711,7 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipHand
  s=phh voice call
  c=IN $ipType ${socket.gLocalAddr().hostAddress}
  b=AS:38
-@@ -1517,7 +1925,7 @@
+@@ -1517,7 +1934,7 @@
  a=des:qos mandatory remote sendrecv
  a=conf:qos remote sendrecv
  a=sendrecv
@@ -1385,7 +1720,7 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipHand
  
              val myHeaders = commonHeaders + //Require: precondition
                  """
-@@ -1547,7 +1955,7 @@
+@@ -1547,7 +1964,7 @@
  
              if(false) {
                  val fakeRtcpSocket = DatagramSocket(0, localAddr) //useless but annoying ImsMediaManager
@@ -1394,7 +1729,7 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipHand
                      rtpSocket, fakeRtcpSocket,
                      ImsMediaSession.SESSION_TYPE_AUDIO,
                      AudioConfig.Builder()
-@@ -1667,17 +2075,28 @@
+@@ -1667,17 +2084,28 @@
                  val callId = request.headers["call-id"]!![0]
                  val cseq = request.headers["cseq"]!![0]
                  smsHeadersMap[token] = smsHeaders(dest, callId, cseq)
@@ -1425,10 +1760,12 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipHand
                  }
              }
              SmsType.RP_ERROR_FROM_NETWORK -> {
-@@ -1688,6 +2107,42 @@
+@@ -1686,6 +2114,42 @@
+             else -> return 500
+         }
          return 200
-     }
- 
++    }
++
 +    /* Decode a raw TS 24.011 SMSC address field, as returned by
 +     * SmsManager.getSmscAddress() on some vendor framework (MIUI/HyperOS), into a plain
 +     * digit string. Layout: length byte, TON/NPI byte, then the number as nibble-swapped
@@ -1463,12 +1800,10 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipHand
 +        }
 +        val out = digits.toString()
 +        return if (out.length >= 6) out else null
-+    }
-+
+     }
+ 
      fun sendSms(
-         smsSmsc: String?,
-         pdu: ByteArray,
-@@ -1718,33 +2173,51 @@
+@@ -1718,33 +2182,51 @@
                      smscIdentity!!.host!!
                  } catch(t: Throwable) {
                      try {
@@ -1530,9 +1865,9 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipHand
                  commonHeaders +
                      """
                      From: <$mySip>
-diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipMessage.kt b/app/src/main/java/me/phh/sip/SipMessage.kt
---- a/app/src/main/java/me/phh/sip/SipMessage.kt	2026-08-23 20:11:27.998743700 +0800
-+++ b/app/src/main/java/me/phh/sip/SipMessage.kt	2026-08-24 00:05:02.274753000 +0800
+diff --git a/app/src/main/java/me/phh/sip/SipMessage.kt b/app/src/main/java/me/phh/sip/SipMessage.kt
+--- a/app/src/main/java/me/phh/sip/SipMessage.kt
++++ b/app/src/main/java/me/phh/sip/SipMessage.kt
 @@ -95,10 +95,7 @@
      override val body: ByteArray = ByteArray(0),
      private val autofill: Boolean = true,
@@ -1545,9 +1880,9 @@ diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/SipMess
  
      override fun toString(): String =
          String(toByteArray(), Charsets.US_ASCII).replace("\r\n", "\n> ")
-diff -ruN --strip-trailing-cr -x '*.orig' a/app/src/main/java/me/phh/sip/Sms.kt b/app/src/main/java/me/phh/sip/Sms.kt
---- a/app/src/main/java/me/phh/sip/Sms.kt	2026-08-23 20:11:28.000806900 +0800
-+++ b/app/src/main/java/me/phh/sip/Sms.kt	2026-08-24 00:05:02.272116300 +0800
+diff --git a/app/src/main/java/me/phh/sip/Sms.kt b/app/src/main/java/me/phh/sip/Sms.kt
+--- a/app/src/main/java/me/phh/sip/Sms.kt
++++ b/app/src/main/java/me/phh/sip/Sms.kt
 @@ -100,6 +100,10 @@
          }
          SmsType.RP_ERROR_FROM_NETWORK.value -> {

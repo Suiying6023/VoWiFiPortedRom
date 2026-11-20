@@ -75,31 +75,37 @@ phh_dangling
             ('second-sim', 'mCallState=0\nmCallState=2', '15000', 'yes', False),
             ('unknown', '', '15000', 'yes', False),
             ('offline', 'mCallState=0\nmCallState=0', '15000', 'no', False),
+            ('dead', 'mCallState=0\nmCallState=0', '15000', 'yes', True),
         ]
         for name, state, event, wifi, expect_recovery in scenarios:
             with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
-                (root/'phh_health.sh').write_text("printf '%s\\n' 'OK incall=0'\n", newline='\n')
+                health = 'BAD phh-not-running incall=0' if name == 'dead' else 'OK incall=0'
+                (root/'phh_health.sh').write_text(f"printf '%s\\n' '{health}'\n", newline='\n')
                 body = '''
 date() { printf '%s\n' 20000; }
-pidof() { printf '%s\n' 123; }
+pidof() { printf '%s\n' "$PHH_TEST_PID"; }
 dumpsys() { printf '%s\n' "$REGISTRY"; }
 ip() { [ "$WIFI" = yes ] && printf '%s\n' 'wlan0 inet 192.0.2.1'; }
 logcat() { printf '%s.123 123 456 D PHH SipHandler: registration granted for 3590s\n' "$EVENT"; }
 flock() { return 0; }
 am() { printf '%s\n' "$*" >> "$PHH_RUNTIME_DIR/actions"; }
+kill() { printf 'kill %s\n' "$*" >> "$PHH_RUNTIME_DIR/actions"; }
 sleep() { if [ "$1" = 120 ]; then exit 0; fi; }
 . "$1"
 '''
                 shell(body, WATCHDOG, argv0=WATCHDOG.as_posix(), env={
                     'PHH_RUNTIME_DIR': root.as_posix(), 'REGISTRY': state,
                     'EVENT': event, 'WIFI': wifi,
+                    'PHH_TEST_PID': '' if name == 'dead' else '123',
                 })
                 actions = root/'actions'
                 self.assertEqual(actions.exists(), expect_recovery)
                 if actions.exists():
-                    self.assertEqual(actions.read_text().strip(), 'force-stop me.phh.ims')
-                self.assertEqual((root/'phh_last_grant').read_text().strip(), event)
+                    expected = 'startservice --user 0 -n me.phh.ims/.PhhImsService' if name == 'dead' else 'kill 123'
+                    self.assertEqual(actions.read_text().strip(), expected)
+                if name != 'dead':
+                    self.assertEqual((root/'phh_last_grant').read_text().strip(), event)
 
 
 class CarrierTests(unittest.TestCase):
@@ -142,7 +148,7 @@ class CarrierTests(unittest.TestCase):
             shell('. "$1"; cc_render "$2" "$3"', CARRIER, original, injected)
             shell('. "$1"; cc_remove_ours "$2" "$3"', CARRIER, injected, restored)
             tree = ET.fromstring(restored.read_text())
-            self.assertEqual([(s.attrib, s.text) for s in tree], [({'name': 'kept'}, 'keep-me')])
+            self.assertEqual([(s.attrib, s.text) for s in tree.findall('string')], [({'name': 'kept'}, 'keep-me')])
             injected.write_text(injected.read_text().replace('>me.phh.ims<', '>stock.ims<'))
             shell('. "$1"; cc_remove_ours "$2" "$3"', CARRIER, injected, restored)
             tree = ET.fromstring(restored.read_text())
@@ -157,7 +163,7 @@ class PackageTests(unittest.TestCase):
         files = module.payload()
         expected = {
             'IwlanAosp': 'b7ea43641071cdb87ad65cb016503f071e3f9ecf1b25d60b4676af8ccc52ced9',
-            'PhhIms': '4a2d9755c86f4a2049b6f9f85aae0ff7cf33b6ed645bc3c866d022e7d53fcfa1',
+            'PhhIms': '8e424d43fda4661a87e467859069d029a49e44a29c062231ba72f849458654cc',
             'MinQns': '432948e7e4d8415b9ee849094da103e91b5a7a26c0040bb1d0501095351e5c43',
         }
         for name, digest in expected.items():
